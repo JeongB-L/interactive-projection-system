@@ -6,6 +6,17 @@ Class project by Jeongbin, Johnny, Nina, and Aneesh.
 
 **Status: working prototype, tested in simulation.** Everything runs on one laptop with a fake Pi. The real Pi, cameras, MediaPipe path and projector have not been tested yet (see [docs/SPEC.md](docs/SPEC.md), section 8).
 
+## Setup (one command, free, no accounts)
+
+Needs Python 3.8+ and an internet connection for the first install. The script installs the C++ toolchain, builds the hub, and runs the tests.
+
+| System | Command |
+|---|---|
+| Windows 10/11 | `powershell -ExecutionPolicy Bypass -File setup.ps1` (installs MSYS2 via winget if missing) |
+| Linux, Raspberry Pi OS, macOS | `./setup.sh`  (on the Pi: `./setup.sh --pi` adds camera and MediaPipe packages) |
+
+Fork or clone first: `git clone https://github.com/JeongB-L/interactive-projection-system && cd interactive-projection-system`. The AI app is optional: put an API key in `.env` (created by the script); everything else works without it. Details and manual steps: [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
 ## Try it (2 minutes, no hardware)
 
 ```bash
@@ -29,7 +40,7 @@ Projector <- HDMI <- Pi browser showing display page <-- actions --+
 - **Two cameras are fused** by confidence, only across cameras that agree on the hand pose.
 - **Gestures:** point = cursor, pinch = click/drag, open-palm swipe = left/right/up/down, open palm held still = home.
 - **Apps** are web pages (launcher, Snake, AI chat, browser). The AI key lives in `.env` on the hub only.
-- **Storage:** video and recordings are files in a blob store (local folder now, cloud later); SQLite stores only each file's key and URI, so ML jobs can loop over the table.
+- **Storage:** video and recordings are files in a blob store (a local folder; the interface allows other stores later); SQLite stores only each file's key and URI, so ML jobs can loop over the table.
 
 ## Layout
 
@@ -46,4 +57,4 @@ Projector <- HDMI <- Pi browser showing display page <-- actions --+
 
 ## Not done yet
 
-Real-Pi testing and calibration accuracy, true stereo 3D touch, a cloud blob store (S3), hub-side hand tracking for non-Pi-5 devices, scroll gesture, Python binding of the gesture engine.
+Real-Pi testing and calibration accuracy, true stereo 3D touch, hub-side hand tracking for non-Pi-5 devices, scroll gesture, Python binding of the gesture engine. Cloud storage is intentionally not built: everything is stored locally, so the project costs nothing to run.

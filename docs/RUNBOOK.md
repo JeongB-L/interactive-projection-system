@@ -2,16 +2,15 @@
 
 Everything is driven by one command: `python ips.py <command>`. Run it from the repo folder. Python 3.8+ is enough (standard library only).
 
-## One-time setup (Windows, already done on Jeongbin's laptop)
+## One-time setup
 
-1. Install MSYS2 and, in the "MSYS2 UCRT64" shell:
-   ```bash
-   pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,boost,openssl,sqlite3,nlohmann-json}
-   ```
-2. Build: `python ips.py build`
-3. (Optional, for the AI app) `copy .env.example .env` and put your key after `ANTHROPIC_API_KEY=`.
+One script installs the toolchain, builds the hub, and runs the tests (see the README):
+- Windows: `powershell -ExecutionPolicy Bypass -File setup.ps1`
+- Linux / Raspberry Pi / macOS: `./setup.sh` (add `--pi` on the Pi for camera packages)
 
-Linux / Raspberry Pi: `sudo apt install build-essential cmake ninja-build libboost-dev libssl-dev libsqlite3-dev nlohmann-json3-dev`, then `python3 ips.py build`.
+Optional, for the AI app only: put your key after `ANTHROPIC_API_KEY=` in `.env`. Without a key everything else still works.
+
+On Linux use `python3` wherever this runbook says `python`.
 
 ## Turn it on
 
@@ -64,12 +63,9 @@ Use `--source camera` for USB webcams. `--send-frames` also uploads video (the h
 | Calibration | `data/calibration.json` |
 | Hub log | `data/logs/hub.log` |
 
-## Moving storage to the cloud later
+## Storage is local on purpose
 
-The database stores only a key and a URI for each file; the bytes live in the blob store.
-1. Copy `data/blobs/*` to the bucket (any tool).
-2. `python ips.py migrate-uri s3://my-bucket/ips` rewrites every URI from its key.
-3. Set `blob_uri` in `config.json`. (The hub currently implements only `file:` storage; an S3 class implementing `IBlobStore` is the one missing piece.)
+Everything is stored on this machine (`data/`): no account, no cloud bill. The database stores a key and a URI for each file, so storage *could* move later (any bucket, NAS or mounted drive), but a cloud store is **not built** and is not needed for testing. Cloud object storage such as AWS S3 is a paid service, so it is deliberately left out. If the team ever wants it: write one class implementing `IBlobStore` (`hub/src/storage.hpp`), copy the files, run `python ips.py migrate-uri <new base>`, set `blob_uri`.
 
 ## Troubleshooting
 

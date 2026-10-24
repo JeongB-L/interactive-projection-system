@@ -1,10 +1,15 @@
 # Specification: Interactive Projection System, Backend (Hub)
 
-Version 1.1 (prototype). Date: 2026-10-24. Owner: Jeongbin Lee.
+Version 1.2 (prototype). Date: 2026-10-24. Owner: Jeongbin Lee.
 Related: [DESIGN.md](DESIGN.md) (rationale) · [INTERFACES.md](INTERFACES.md) (C++ slots) · [PROTOCOL.md](PROTOCOL.md) (messages) · [RUNBOOK.md](RUNBOOK.md) (how to run it)
 
 **MUST** = required for the prototype, **SHOULD** = target, **MAY** = optional.
 The **Status** column says what exists in the repo today: Done (built and tested), Partial, Untested (written, no hardware to test), Not yet.
+
+## Changes in 1.2
+
+- **Local only.** Cloud storage (e.g. AWS S3, a paid service) is intentionally not built; `IBlobStore` remains so it can be added later. The project has no running costs and needs no accounts.
+- **One-command setup** for forks: `setup.ps1` (Windows) and `setup.sh` (Linux/Pi/macOS). (F-33)
 
 ## Changes in 1.1 (from team feedback)
 
@@ -89,10 +94,11 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 | F-25 | The agent reports `track_ms`; the hub logs it, so Pi-local vs. other configurations can be compared on the same input. | MUST | Done |
 | F-26 | Model files in `models/<name>/<version>/` with `models.yaml`. | SHOULD | Deferred: no hub-side model yet. Folder reserved. |
 | F-27 | Python binding of the gesture engine (`ipscore`). | MAY | Deferred |
-| F-28 | **Blob store** behind `IBlobStore`. Config `blob_uri`. Implemented: `file:` (local disk). Cloud implementations plug in later. | MUST | Done (local) |
+| F-28 | **Blob store** behind `IBlobStore`. Config `blob_uri`. Implemented: `file:` (local disk) only, by decision (no cloud cost). | MUST | Done (local) |
 | F-29 | **SQLite catalog** (`data/ips.db`) with tables `sessions` and `assets`. `assets` rows hold `key`, `uri`, `kind`, `bytes`, `meta` (JSON), `created_utc`, and the session id. Bulk data is never inserted into SQLite. | MUST | Done |
 | F-30 | Switching storage = change `blob_uri`; `ips.py migrate-uri OLD NEW` rewrites `uri` from `key`. | MUST | Done (rewrite only; copying the files is manual/`aws s3 sync`) |
 | F-31 | ML access: iterate over `assets` (filter by `kind`, session, date), resolve `uri`, read the blob. | MUST | Done (`tools/iter_assets.py`) |
+| F-33 | `setup.ps1` / `setup.sh` install dependencies, build, and test from a fresh clone; documented in the README. | MUST | See section 8 |
 | F-32 | CLI `ips.py`: start, stop, status, sim, open, launch, home, calibrate, apps, sessions, assets, bench, migrate-uri, logs. | MUST | Done |
 
 ## 4. Non-functional requirements
@@ -156,5 +162,5 @@ Endpoints: `ws://hub:8080/edge`, `ws://hub:8080/display`, `GET /status`, `GET /a
 2. **Latency:** only simulated numbers exist. Projector input lag is unknown.
 3. **Projected light on the hand** may degrade tracking; measure with T-10.
 4. **Pi code is untested:** the camera/MediaPipe/picamera2 paths and OS pointer injection could not be run here.
-5. **Cloud:** the blob store has only the local implementation; an S3-compatible one is the next step.
+5. **Cloud:** intentionally not built (paid, not needed for testing). Adding it means one `IBlobStore` class plus `migrate-uri`.
 6. **Hub-side tracking** (F-2) is not built; the Pi 5 is expected to track locally.

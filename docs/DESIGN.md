@@ -99,11 +99,11 @@ The **only shared contract** everyone must agree on is the message format in PRO
 Bulk data (camera video, session recordings) is never put into the database. Each file is written to a **blob store** and SQLite keeps one row per file: `key` (path relative to the store), `uri` (full location), `kind`, `bytes`, `meta`, and the session.
 
 ```
-camera frames --> IBlobStore (file:./data/blobs today, s3://... later) --> sessions/<time>_s3/cam0.mjpeg
+camera frames --> IBlobStore (file:./data/blobs; other stores possible later) --> sessions/<time>_s3/cam0.mjpeg
                           |
                  SQLite assets row: key, uri, kind, bytes, session   <-- ML jobs loop over these rows
 ```
-- Local to cloud: copy the blobs, rewrite every `uri` from its `key` (`ips.py migrate-uri`), change `blob_uri`. No other code changes.
+- Moving storage later (not planned, local only): copy the blobs, rewrite every `uri` from its `key` (`ips.py migrate-uri`), change `blob_uri`. No other code changes.
 - ML access: `SELECT ... FROM assets WHERE kind='video_mjpeg'`, resolve the URI, read the bytes (`tools/iter_assets.py`).
 - Video is stored as concatenated JPEGs per camera (MJPEG), which ffmpeg and OpenCV read directly; it avoids a video encoder on the hub.
 - Camera frames are off by default (`record.frames`); hand landmarks are on.
