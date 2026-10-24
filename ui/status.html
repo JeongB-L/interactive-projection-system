@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>IPS status</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
+  table { border-collapse: collapse; margin-bottom: 16px; }
+  td, th { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
+  .ok { color: #15803d; } .bad { color: #b91c1c; }
+  code { background: #eee; padding: 1px 4px; }
+</style></head>
+<body>
+<h2>Interactive Projection System: hub status</h2>
+<div id="o">loading...</div>
+<script>
+const f = (v, d = 1) => (v === undefined || v === null) ? '-' : Number(v).toFixed(d);
+async function tick() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const cams = Object.entries(s.cameras).map(([c, v]) => `cam${c}: ${v.frames} frames, calibrated: ${v.calibrated}`).join('<br>') || '-';
+    const gc = Object.entries(s.gesture_counts).map(([k, v]) => `${k}=${v}`).join(' ') || '-';
+    const last = s.last_gestures.slice().reverse().map(g => g.kind + (g.dir ? ' ' + g.dir : '')).join(', ') || '-';
+    document.getElementById('o').innerHTML = `
+      <table>
+      <tr><th>Edge (Pi)</th><td class="${s.edge_connected ? 'ok' : 'bad'}">${s.edge_connected ? 'connected: ' + s.edge_device : 'not connected'}</td></tr>
+      <tr><th>Display pages</th><td>${s.displays}</td></tr>
+      <tr><th>App</th><td>${s.app}</td></tr>
+      <tr><th>Frames/s (all cameras)</th><td>${f(s.fps_total)}</td></tr>
+      <tr><th>Cameras</th><td>${cams}</td></tr>
+      <tr><th>Hub processing ms (p50 / p95)</th><td>${f(s.hub_ms.p50, 3)} / ${f(s.hub_ms.p95, 3)}</td></tr>
+      <tr><th>End-to-end ms (p50 / p95)</th><td>${f(s.e2e_ms.p50)} / ${f(s.e2e_ms.p95)} <small>(needs synced clocks)</small></td></tr>
+      <tr><th>Tracking ms on Pi (avg)</th><td>${f(s.track_ms_avg)}</td></tr>
+      <tr><th>Dropped frames / bad msgs</th><td>${s.dropped} / ${s.bad_messages}</td></tr>
+      <tr><th>JPEG frames received</th><td>${s.jpeg_frames}</td></tr>
+      <tr><th>Gestures</th><td>${gc}</td></tr>
+      <tr><th>Last</th><td>${last}</td></tr>
+      <tr><th>Session / storage</th><td>#${s.session} &nbsp; <code>${s.blob_base}</code></td></tr>
+      </table>`;
+  } catch (e) { document.getElementById('o').innerHTML = '<span class="bad">hub not reachable</span>'; }
+}
+tick(); setInterval(tick, 1000);
+</script></body></html>

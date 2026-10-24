@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>AI chat</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #111827; color: #fff; padding: 32px; box-sizing: border-box; height: 100vh; display: flex; flex-direction: column; }
+  h1 { font-weight: 500; margin: 0 0 16px; }
+  #presets { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  button { font-size: 22px; padding: 14px 22px; border-radius: 12px; border: 3px solid transparent; background: #374151; color: #fff; cursor: pointer; }
+  button.hot { border-color: #38bdf8; }
+  #row { display: flex; gap: 12px; margin-bottom: 16px; }
+  input { flex: 1; font-size: 22px; padding: 12px; border-radius: 10px; border: 0; }
+  #out { flex: 1; background: #1f2937; border-radius: 12px; padding: 20px; font-size: 24px; line-height: 1.5; white-space: pre-wrap; overflow: auto; }
+</style></head>
+<body>
+<h1>AI chat</h1>
+<div id="presets"></div>
+<div id="row"><input id="q" placeholder="Type with a keyboard, or use the buttons above"><button id="send">Ask</button></div>
+<div id="out">Choose a question.</div>
+<script>
+const out = document.getElementById('out'), q = document.getElementById('q');
+const presets = ['Tell me a fun fact', 'Explain how a projector works in 3 sentences', 'Give me a riddle', 'What is a hand gesture UI good for?'];
+async function ask(text) {
+  out.textContent = 'Thinking...';
+  try {
+    const r = await fetch('/api/ai', { method: 'POST', body: JSON.stringify({ prompt: text }) });
+    const j = await r.json();
+    out.textContent = j.ok ? j.text : ('AI unavailable: ' + j.error);
+  } catch (e) { out.textContent = 'AI unavailable: the hub could not be reached.'; }
+}
+const box = document.getElementById('presets');
+presets.forEach(p => { const b = document.createElement('button'); b.textContent = p; b.onclick = () => ask(p); box.appendChild(b); });
+document.getElementById('send').onclick = () => { if (q.value.trim()) ask(q.value.trim()); };
+let hot = null;
+addEventListener('mousemove', e => {
+  const t = e.target.closest && e.target.closest('button');
+  if (hot !== t) { if (hot) hot.classList.remove('hot'); hot = t; if (hot) hot.classList.add('hot'); }
+});
+</script></body></html>

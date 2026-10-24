@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Launcher</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+  h1 { font-weight: 500; margin: 0 0 32px; }
+  #grid { display: flex; gap: 32px; }
+  .tile { width: 260px; height: 200px; border-radius: 20px; background: #1e293b; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 32px; border: 4px solid transparent; cursor: pointer; }
+  .tile small { font-size: 16px; color: #94a3b8; margin-top: 8px; }
+  .tile.hot { border-color: #38bdf8; background: #334155; }
+  p { color: #94a3b8; margin-top: 40px; font-size: 18px; }
+</style></head>
+<body>
+<h1>Pick an app</h1>
+<div id="grid"></div>
+<p>Point with your index finger, pinch to select. Hold an open palm still to come back here.</p>
+<script>
+let hot = null;
+fetch('/api/apps').then(r => r.json()).then(apps => {
+  const g = document.getElementById('grid');
+  apps.forEach(a => {
+    const d = document.createElement('div'); d.className = 'tile'; d.dataset.app = a.id;
+    d.innerHTML = a.name + '<small>' + (a.needs_internet ? 'needs internet' : 'works offline') + '</small>';
+    d.addEventListener('click', () => fetch('/api/launch', { method: 'POST', body: JSON.stringify({ app: a.id }) }));
+    g.appendChild(d);
+  });
+});
+addEventListener('mousemove', e => {
+  const t = e.target.closest && e.target.closest('.tile');
+  if (hot !== t) { if (hot) hot.classList.remove('hot'); hot = t; if (hot) hot.classList.add('hot'); }
+});
+</script></body></html>

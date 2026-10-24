@@ -1,0 +1,27 @@
+{
+  "port": 8080,
+  "bind": "0.0.0.0",
+  "screen_w": 1920,
+  "screen_h": 1080,
+  "db_path": "data/ips.db",
+  "blob_uri": "file:./data/blobs",
+  "calib_path": "data/calibration.json",
+  "record": { "landmarks": true, "frames": false },
+  "gesture": {
+    "pinch_close": 0.25,
+    "pinch_open": 0.40,
+    "swipe_min_speed": 1.2,
+    "swipe_window_ms": 250,
+    "swipe_cooldown_ms": 400,
+    "dead_zone_px": 6,
+    "min_cutoff": 1.0,
+    "beta": 0.02,
+    "home_hold_ms": 1000,
+    "stale_ms": 150
+  },
+  "apps": [
+    { "id": "browser", "name": "Browser", "url": "https://en.wikipedia.org", "needs_internet": true },
+    { "id": "ai", "name": "AI chat", "url": "/apps/ai.html", "needs_internet": true },
+    { "id": "snake", "name": "Snake", "url": "/apps/snake.html", "needs_internet": false }
+  ]
+}
