@@ -1,5 +1,13 @@
 <!doctype html>
+<!--
+ui/status.html
+WHAT THIS FILE DOES
+  A plain status page for the operator (not projected). Once a second it asks the hub for its
+  live numbers and shows them: is the Pi connected, frames per second, processing and
+  end-to-end latency, dropped frames, gesture counts, and where recordings are stored.
+-->
 <html lang="en"><head><meta charset="utf-8"><title>IPS status</title>
+<!-- Styles: simple table. -->
 <style>
   body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
   table { border-collapse: collapse; margin-bottom: 16px; }
@@ -11,7 +19,9 @@
 <h2>Interactive Projection System: hub status</h2>
 <div id="o">loading...</div>
 <script>
+// Format a number with d decimals ('-' when it is missing).
 const f = (v, d = 1) => (v === undefined || v === null) ? '-' : Number(v).toFixed(d);
+// Fetch /api/status and redraw the table; show 'hub not reachable' if the request fails.
 async function tick() {
   try {
     const s = await (await fetch('/api/status')).json();
@@ -36,5 +46,6 @@ async function tick() {
       </table>`;
   } catch (e) { document.getElementById('o').innerHTML = '<span class="bad">hub not reachable</span>'; }
 }
+// Refresh immediately, then once per second.
 tick(); setInterval(tick, 1000);
 </script></body></html>

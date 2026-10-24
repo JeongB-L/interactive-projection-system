@@ -1,5 +1,12 @@
 <!doctype html>
+<!--
+ui/apps/snake.html
+WHAT THIS FILE DOES
+  A small Snake game, controlled by hand swipes (left / right / up / down) or the arrow keys.
+  Works fully offline. Pinch (click) to start or restart.
+-->
 <html lang="en"><head><meta charset="utf-8"><title>Snake</title>
+<!-- Styles: green theme, centered canvas. -->
 <style>
   body { margin: 0; background: #052e16; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
   canvas { background: #022c22; border: 4px solid #16a34a; }
@@ -9,14 +16,19 @@
 <div id="hud">Score 0 — swipe to steer, pinch to start</div>
 <canvas id="c" width="800" height="600"></canvas>
 <script>
+// Canvas, its drawing context, and the score line.
 const c = document.getElementById('c'), ctx = c.getContext('2d'), hud = document.getElementById('hud');
 const N = 20, W = c.width / 40, H = c.height / 30;   // 40 x 30 cells
+// Game state: snake cells, direction, food cell, score, and the game-clock timer.
 let snake, dir, food, score, timer = null;
+// New game: reset the snake in the middle and start the game clock (a tick every 120 ms).
 function start() {
   snake = [{ x: 20, y: 15 }, { x: 19, y: 15 }, { x: 18, y: 15 }]; dir = { x: 1, y: 0 }; score = 0; place();
   clearInterval(timer); timer = setInterval(step, 120);
 }
+// Put the food on a random cell.
 function place() { food = { x: Math.floor(Math.random() * 40), y: Math.floor(Math.random() * 30) }; }
+// One game tick: move the head; end the game on a wall or self hit; grow when eating; redraw.
 function step() {
   const h = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
   if (h.x < 0 || h.y < 0 || h.x >= 40 || h.y >= 30 || snake.some(s => s.x === h.x && s.y === h.y)) {
@@ -29,11 +41,13 @@ function step() {
   ctx.fillStyle = '#f43f5e'; ctx.fillRect(food.x * W, food.y * H, W, H);
   ctx.fillStyle = '#4ade80'; snake.forEach(s => ctx.fillRect(s.x * W, s.y * H, W - 1, H - 1));
 }
+// Change direction (a 180-degree reversal is ignored).
 function steer(d) {
   const m = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[d]; if (!m) return;
   if (m[0] === -dir.x && m[1] === -dir.y) return;   // no reversing
   dir = { x: m[0], y: m[1] };
 }
+// Controls: hand swipes (a custom event from the display page), arrow keys for testing, and a click/pinch to start.
 addEventListener('ips-swipe', e => steer(e.detail.dir));
 addEventListener('keydown', e => steer({ ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }[e.key]));
 addEventListener('click', () => { if (!timer) start(); });

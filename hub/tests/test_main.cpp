@@ -1,3 +1,12 @@
+// test_main.cpp
+// ---------------------------------------------------------------------------
+// WHAT THIS FILE DOES
+//   Unit tests for the hub's pure logic and storage. No test framework is needed: each TEST(...)
+//   below registers itself, main() at the bottom runs them all, and CHECK(...) records a failure.
+//   Run with:  python ips.py test      (exit code 0 = all passed)
+//   Covered: homography math, cursor mapping, pinch hysteresis, swipe, home, hand loss, dead zone,
+//            two-camera fusion (including the pose-change bug fix), and the blob store + SQLite catalog.
+// ---------------------------------------------------------------------------
 // Minimal self-contained tests (no framework). Run: ips_tests
 #include <cstdio>
 #include <filesystem>
@@ -6,18 +15,24 @@
 #include "storage.hpp"
 
 using namespace ips;
+// Counters for the final summary: failed checks and total checks run.
 static int g_fail = 0, g_run = 0;
+// CHECK(cond): count it, and print the file/line if the condition is false.
 #define CHECK(c) do { ++g_run; if (!(c)) { ++g_fail; std::printf("  FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); } } while (0)
+// TEST(name): defines a test function and registers it in a list so main() can run it.
 #define TEST(name) static void name(); static struct R_##name { R_##name() { tests().push_back({#name, name}); } } r_##name; static void name()
 struct T { const char* n; void (*f)(); };
 static std::vector<T>& tests() { static std::vector<T> v; return v; }
 
+// Helper: how many gestures of a given kind are in a list.
 static int count(const std::vector<Gesture>& v, const char* k) {
   int n = 0;
   for (auto& g : v) if (g.kind == k) ++n;
   return n;
 }
 
+// The 4 points used to solve the homography must map exactly onto their targets,
+// and a point in the middle must land in the middle of the screen.
 TEST(homography_maps_corners) {
   std::array<Vec2, 4> src{{{0.2, 0.2}, {0.8, 0.25}, {0.85, 0.8}, {0.15, 0.75}}};
   std::array<Vec2, 4> dst{{{192, 108}, {1728, 108}, {1728, 972}, {192, 972}}};
@@ -31,6 +46,7 @@ TEST(homography_maps_corners) {
   CHECK(mid.x > 800 && mid.x < 1100 && mid.y > 400 && mid.y < 700);
 }
 
+// Four points on one line cannot define a mapping: the solver must refuse, not return garbage.
 TEST(homography_rejects_degenerate) {
   std::array<Vec2, 4> src{{{0, 0}, {1, 1}, {2, 2}, {3, 3}}};  // collinear
   std::array<Vec2, 4> dst{{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
@@ -38,12 +54,15 @@ TEST(homography_rejects_degenerate) {
   CHECK(!solve_homography(src, dst, h));
 }
 
+// Before calibration, a camera point (0..1) is simply scaled to the screen size.
 TEST(mapper_uncalibrated_scales_to_screen) {
   Mapper m(1000, 500);
   Vec2 p = m.to_px(0, {0.5, 0.5});
   CHECK(std::fabs(p.x - 500) < 1e-9 && std::fabs(p.y - 250) < 1e-9);
 }
 
+// Thumb-index ratio wobbles between the two thresholds: that must produce exactly ONE click,
+// not a flickering series of clicks.
 TEST(pinch_hysteresis_one_click) {
   GestureConfig c;
   RuleRecognizer r(c, 1920, 1080);
@@ -59,6 +78,7 @@ TEST(pinch_hysteresis_one_click) {
   CHECK(count(all, "up") == 1);
 }
 
+// An open palm moving quickly to the right must produce exactly one 'right' swipe (and no 'home').
 TEST(swipe_right_detected_once) {
   GestureConfig c;
   RuleRecognizer r(c, 1920, 1080);
@@ -74,6 +94,7 @@ TEST(swipe_right_detected_once) {
   CHECK(count(all, "home") == 0);
 }
 
+// Slow drifting of an open palm must NOT count as a swipe.
 TEST(slow_palm_motion_is_not_a_swipe) {
   GestureConfig c;
   RuleRecognizer r(c, 1920, 1080);
@@ -87,6 +108,7 @@ TEST(slow_palm_motion_is_not_a_swipe) {
   CHECK(count(all, "swipe") == 0);
 }
 
+// An open palm held still: no 'home' before about 1 second, exactly one after that (latched, no repeats).
 TEST(home_after_hold) {
   GestureConfig c;
   RuleRecognizer r(c, 1920, 1080);
@@ -102,6 +124,7 @@ TEST(home_after_hold) {
   CHECK(homes_after == 1);  // latched: no repeat while the palm stays up
 }
 
+// If the hand disappears while pinching, the click is released and the cursor hidden.
 TEST(hand_lost_releases_and_hides) {
   GestureConfig c;
   RuleRecognizer r(c, 1920, 1080);
@@ -113,6 +136,7 @@ TEST(hand_lost_releases_and_hides) {
   CHECK(count(g, "hide") == 1);
 }
 
+// Tiny 2 px jitter inside a 10 px dead zone must not generate a stream of move events.
 TEST(dead_zone_suppresses_jitter) {
   GestureConfig c;
   c.dead_zone_px = 10;
@@ -127,12 +151,15 @@ TEST(dead_zone_suppresses_jitter) {
   CHECK(moves == 1);  // only the first position is emitted
 }
 
+// Helper: a hand whose 21 landmarks are all at one point (enough for position/confidence tests).
 static Hand hand_at(double x, double y, float score) {
   Hand h; h.score = score;
   for (int i = 0; i < 21; ++i) { h.xyz[i * 3] = float(x); h.xyz[i * 3 + 1] = float(y); }
   return h;
 }
 
+// Two cameras disagree: the result leans toward the more confident one, and a camera that
+// stops reporting is ignored after the stale timeout.
 TEST(fusion_weights_by_confidence_and_drops_stale) {
   Mapper m(1000, 1000);
   Fuser fu;
@@ -151,6 +178,7 @@ TEST(fusion_weights_by_confidence_and_drops_stale) {
 }
 
 
+// (helper below builds a hand with realistic finger positions, so open palm vs pointing can be told apart)
 // A hand with real finger geometry: open palm centred at (px,py), or pointing with the index tip there.
 static Hand pose_hand(bool open, double px, double py, float score) {
   Hand h; h.score = score;
@@ -167,6 +195,8 @@ static Hand pose_hand(bool open, double px, double py, float score) {
   return h;
 }
 
+// Regression test for a real bug: when the cameras notice the pose change one frame apart,
+// fusion must not average two different poses and invent a swipe.
 TEST(staggered_pose_change_across_cameras_is_not_a_swipe) {
   Mapper m(1920, 1080);
   Fuser fu;
@@ -186,6 +216,8 @@ TEST(staggered_pose_change_across_cameras_is_not_a_swipe) {
   CHECK(count(all, "swipe") == 0);
 }
 
+// Record a fake session (events + two cameras of video), then check that the files exist on disk
+// and that the SQLite catalog holds only correct keys, URIs and sizes that point at them.
 TEST(storage_catalog_points_at_blobs) {
   namespace fs = std::filesystem;
   fs::path tmp = fs::temp_directory_path() / "ips_test_storage";
@@ -228,6 +260,7 @@ TEST(storage_catalog_points_at_blobs) {
   fs::remove_all(tmp, ec1);
 }
 
+// Runs every registered test, prints ok/FAIL per test and a summary, and returns non-zero on failure.
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   for (auto& t : tests()) {

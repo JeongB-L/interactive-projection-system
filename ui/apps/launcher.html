@@ -1,5 +1,12 @@
 <!doctype html>
+<!--
+ui/apps/launcher.html
+WHAT THIS FILE DOES
+  The home screen: one big tile per app listed by the hub (config.json). Point at a tile and pinch
+  to launch it. An open palm held still returns here from any app.
+-->
 <html lang="en"><head><meta charset="utf-8"><title>Launcher</title>
+<!-- Styles: dark background, centered row of large tiles; a tile gets a blue border while the cursor is over it. -->
 <style>
   body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
   h1 { font-weight: 500; margin: 0 0 32px; }
@@ -11,19 +18,25 @@
 </style></head>
 <body>
 <h1>Pick an app</h1>
+<!-- The tiles are created by the script below once the hub tells us which apps exist. -->
 <div id="grid"></div>
 <p>Point with your index finger, pinch to select. Hold an open palm still to come back here.</p>
 <script>
+// 'hot' is the tile currently under the cursor (highlighted).
 let hot = null;
+// Ask the hub which apps exist and build one tile per app.
 fetch('/api/apps').then(r => r.json()).then(apps => {
   const g = document.getElementById('grid');
   apps.forEach(a => {
     const d = document.createElement('div'); d.className = 'tile'; d.dataset.app = a.id;
     d.innerHTML = a.name + '<small>' + (a.needs_internet ? 'needs internet' : 'works offline') + '</small>';
+    // Selecting a tile (a pinch over it) tells the hub to launch that app.
     d.addEventListener('click', () => fetch('/api/launch', { method: 'POST', body: JSON.stringify({ app: a.id }) }));
     g.appendChild(d);
   });
 });
+// Hover highlight. The cursor dot sends synthetic mouse moves, and CSS :hover ignores those,
+// so we toggle the highlight class ourselves.
 addEventListener('mousemove', e => {
   const t = e.target.closest && e.target.closest('.tile');
   if (hot !== t) { if (hot) hot.classList.remove('hot'); hot = t; if (hot) hot.classList.add('hot'); }

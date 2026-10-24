@@ -1,55 +1,83 @@
 <!doctype html>
+<!--
+ui/display.html
+WHAT THIS FILE DOES
+  The page that is actually PROJECTED. Open it fullscreen (kiosk) on the Raspberry Pi's HDMI output.
+  It shows the current app inside a frame, draws the red cursor, and listens to the hub over a
+  WebSocket: when the hub says move / press / release / swipe, this page replays that as mouse
+  events inside the app, so ordinary web pages react to hand gestures.
+  It also shows calibration markers, dims the picture on request, and tells the hub its own size.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>IPS display</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Styles: a black stage holding the app frame, the cursor dot, calibration overlay, dimmer, toast and connection badge. -->
 <style>
+  /* Full-screen black page, no scrollbars. */
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  /* The app (launcher, game, AI chat...) fills the whole page inside an iframe. */
   #app { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+  /* The red cursor dot, drawn on top of everything; the hub moves it. */
   #cursor { position: fixed; left: 0; top: 0; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%;
             border: 3px solid #e11d48; background: rgba(225,29,72,.25); pointer-events: none; display: none; z-index: 10; }
+  /* Filled and slightly smaller while pinching (the mouse button is 'down'). */
   #cursor.down { background: #e11d48; transform: scale(.8); }
+  /* A black layer whose opacity dims the projected picture (the brightness command). */
   #dim { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 20; }
+  /* Calibration overlay: dark backdrop, a yellow marker to point at, and instructions. */
   #calib { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; z-index: 15; pointer-events: none; }
   #marker { position: absolute; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%; background: #fde047; border: 6px solid #111; }
   #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); color: #fff; font-size: 28px; text-align: center; }
+  /* Short messages at the bottom of the screen, e.g. 'Swipe left'. */
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111; color: #fff; padding: 8px 16px;
            border-radius: 8px; font-size: 16px; display: none; z-index: 30; }
+  /* Small badge showing the connection status to the hub. */
   #conn { position: fixed; right: 8px; top: 8px; font-size: 12px; color: #fff; background: #b91c1c; padding: 2px 8px; border-radius: 6px; z-index: 30; }
   #conn.ok { background: #15803d; }
 </style>
 </head>
 <body>
+<!-- The app currently being shown. The hub tells this page which address to load. -->
 <iframe id="app" title="app"></iframe>
+<!-- Calibration overlay (hidden until the hub starts calibration), cursor, dimmer, message toast, connection badge. -->
 <div id="calib"><div id="marker"></div><div id="msg"></div></div>
 <div id="cursor"></div>
 <div id="dim"></div>
 <div id="toast"></div>
 <div id="conn">connecting</div>
 <script>
+// References to page elements, plus two bits of state (last pressed element, toast timer).
 const frame = document.getElementById('app'), cursor = document.getElementById('cursor');
 const toastEl = document.getElementById('toast'), conn = document.getElementById('conn');
 let lastDown = null, toastTimer = null;
 
+// Show a short message for 2.5 seconds.
 function toast(t) { toastEl.textContent = t; toastEl.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.style.display = 'none', 2500); }
+// Tell the hub our real pixel size so cursor coordinates match what is on screen.
 function postSize() { fetch('/api/display_size', { method: 'POST', body: JSON.stringify({ w: innerWidth, h: innerHeight }) }).catch(() => {}); }
 
+// Find the element of the app under the cursor. This only works for pages served by our own hub;
+// an external website is cross-origin, throws, and we return null (use the agent's --os-pointer for those).
 function target(x, y) {
   try {
     const d = frame.contentDocument; if (!d) return null;
     return { win: frame.contentWindow, doc: d, el: d.elementFromPoint(x, y) };
   } catch (e) { return null; }   // cross-origin page: cannot be driven from here
 }
+// Dispatch a synthetic mouse event on that element, as a real mouse would.
 function fire(t, type, x, y, extra) {
   if (!t || !t.el) return;
   t.el.dispatchEvent(new t.win.MouseEvent(type, Object.assign({ bubbles: true, cancelable: true, clientX: x, clientY: y, view: t.win }, extra || {})));
 }
 
+// Handle one action from the hub: hide, home, swipe, or cursor move / press / release.
 function onAction(a) {
   const x = a.x, y = a.y;
   if (a.kind === 'hide') { cursor.style.display = 'none'; return; }
   if (a.kind === 'home') { toast('Home'); return; }
+  // A swipe is delivered to the app as a custom 'ips-swipe' event carrying the direction.
   if (a.kind === 'swipe') {
     toast('Swipe ' + a.detail);
     try {
@@ -57,8 +85,10 @@ function onAction(a) {
     } catch (e) { toast('External page: run the agent with --os-pointer'); }
     return;
   }
+  // Any other action: show the cursor and move it to the reported position.
   cursor.style.display = 'block';
   cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)' + (cursor.classList.contains('down') ? ' scale(.8)' : '');
+  // Pass the action to the app as mouse events. A release over the same element as the press becomes a click.
   const t = target(x, y);
   if (a.kind === 'move') fire(t, 'mousemove', x, y);
   else if (a.kind === 'down') { cursor.classList.add('down'); lastDown = t && t.el; fire(t, 'mousedown', x, y); }
@@ -69,6 +99,7 @@ function onAction(a) {
   }
 }
 
+// Show or hide the calibration marker and the instruction text.
 function onCalib(m) {
   const box = document.getElementById('calib');
   if (m.done) { box.style.display = 'none'; toast(m.cameras_calibrated ? 'Calibrated ' + m.cameras_calibrated + ' camera(s)' : 'Calibration cleared'); return; }
@@ -77,10 +108,12 @@ function onCalib(m) {
   document.getElementById('msg').textContent = 'Point at the yellow dot and pinch (' + (m.step + 1) + '/' + m.total + ')';
 }
 
+// Open the WebSocket to the hub's /display path and react to each message; reconnect automatically if it drops.
 function connect() {
   const ws = new WebSocket('ws://' + location.host + '/display');
   ws.onopen = () => { conn.textContent = 'live'; conn.className = 'ok'; postSize(); setTimeout(() => conn.style.display = 'none', 1500); };
   ws.onclose = () => { conn.style.display = 'block'; conn.textContent = 'reconnecting'; conn.className = ''; setTimeout(connect, 1000); };
+  // Message types: action (cursor/gesture), content (switch app), calib (markers), brightness (dim).
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t === 'action') onAction(m);
@@ -89,6 +122,7 @@ function connect() {
     else if (m.t === 'brightness') document.getElementById('dim').style.opacity = 1 - m.value;
   };
 }
+// Report the size again if the window changes, then start connecting.
 addEventListener('resize', postSize);
 connect();
 </script>

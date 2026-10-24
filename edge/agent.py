@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# edge/agent.py
+# ---------------------------------------------------------------------------
+# WHAT THIS FILE DOES
+#   The program that runs on the Raspberry Pi (the "edge"). It produces hand landmarks and streams
+#   them to the hub over a WebSocket. Three sources of hand data are available:
+#     synthetic  fake hands doing a scripted routine (no hardware needed; used for testing)
+#     replay     re-send a recording the hub made earlier
+#     camera / picamera  real cameras + MediaPipe hand tracking (written but not yet tested on hardware)
+#   It can also turn the hub's actions into real OS mouse events (--os-pointer) so any window
+#   on the Pi, such as a real web browser, can be controlled by gestures.
+# ---------------------------------------------------------------------------
 """Pi-side agent: produces hand landmarks and sends them to the hub.
 
 Sources:
@@ -20,21 +31,28 @@ import sys
 import threading
 import time
 
+# Make the sibling file wsclient.py importable no matter where the script is run from.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wsclient import WS, WSClosed  # noqa: E402
 
 
 # ---------------------------------------------------------------- synthetic hands
+# Build a fake hand: 21 landmarks laid out like MediaPipe's, so the hub's real logic
+# can be tested without any camera.
 def make_hand(ax, ay, pose, pinch, rng, noise):
     """21 MediaPipe-style landmarks. pose 'point': index tip at (ax,ay). 'open': palm centre at (ax,ay)."""
+    # Place the wrist so the index fingertip (point) or the palm center (open) lands at the requested spot.
     if pose == "point":
         wx, wy = ax + 0.04, ay + 0.32
     else:
         wx, wy = ax, ay + 0.15
+    # Landmark 0 is the wrist, 1-4 the thumb, then four fingers of four landmarks each.
     p = [None] * 21
     p[0] = (wx, wy)
     p[1], p[2], p[3], p[4] = (wx - .04, wy - .04), (wx - .06, wy - .08), (wx - .08, wy - .12), (wx - .09, wy - .16)
+    # Horizontal offsets of the index, middle, ring and pinky knuckles from the wrist.
     dx = [-0.04, 0.0, 0.035, 0.065]
+    # Each finger is either stretched out (tip far from the wrist) or curled in (tip near the knuckle).
     for f in range(4):
         base = 5 + 4 * f
         mx, my = wx + dx[f], wy - 0.15
@@ -44,18 +62,23 @@ def make_hand(ax, ay, pose, pinch, rng, noise):
             p[base + 1], p[base + 2], p[base + 3] = (mx, my - .07), (mx, my - .12), (mx, my - .17)
         else:
             p[base + 1], p[base + 2], p[base + 3] = (mx, my - .04), (mx, my), (mx, my + .03)
+    # Pinch: slide the thumb tip onto the index tip (pinch = 1 means they touch).
     if pinch > 0:  # thumb tip slides onto the index tip
         tx, ty = p[8]
         p[4] = (p[4][0] + (tx + .004 - p[4][0]) * pinch, p[4][1] + (ty + .004 - p[4][1]) * pinch)
+    # Add a little random noise so the data looks like a real tracker's output.
     return [[x + rng.gauss(0, noise), y + rng.gauss(0, noise), 0.0] for x, y in p]
 
 
+# The scripted routine repeats every 12 seconds.
 PERIOD = 12.0
 
 
+# The scripted fake user: point and click twice, swipe right, then hold an open palm to go home.
 def script(t):
     """What the fake user does at time t (seconds, repeating every 12 s)."""
     t = t % PERIOD
+    # 0-6 s: point at the screen and move in a smooth loop, with two short pinches (clicks).
     if t < 6:  # point and move; pinch twice
         ax = 0.5 + 0.25 * math.sin(2 * math.pi * t / 6)
         ay = 0.5 + 0.2 * math.sin(2 * math.pi * t / 4)
@@ -64,24 +87,29 @@ def script(t):
             if start <= t < start + 0.45:
                 pinch = min(1.0, (t - start) / 0.1, (start + 0.45 - t) / 0.1)
         return "point", ax, ay, max(0.0, pinch)
+    # 6-7 s: open palm, then a fast move to the right (a swipe).
     if t < 7:  # open palm, swipe right
         if t < 6.2:
             return "open", 0.15, 0.5, 0.0
         if t < 6.6:
             return "open", 0.15 + 0.7 * (t - 6.2) / 0.4, 0.5, 0.0
         return "open", 0.85, 0.5, 0.0
+    # 7-8.5 s: hand out of view (this resets the recognizer).
     if t < 8.5:
         return None
+    # 8.5-10.2 s: open palm held still, which should trigger 'home'. After that: no hand until 12 s.
     if t < 10.2:  # open palm held still -> home
         return "open", 0.5, 0.5, 0.0
     return None
 
 
+# Produce one camera's JSON message for time t.
 def synthetic_frame(cam, seq, t, rng):
     s = script(t)
     hands = []
     if s:
         pose, ax, ay, pinch = s
+        # Camera 1 is made slightly noisier and offset so the two cameras do not agree exactly.
         noise = 0.002 if cam == 0 else 0.004
         pts = make_hand(ax + (0.003 if cam else 0), ay, pose, pinch, rng, noise)
         hands.append({"right": True, "score": round(0.95 if cam == 0 else 0.85, 2), "pts": pts})
@@ -90,21 +118,26 @@ def synthetic_frame(cam, seq, t, rng):
 
 
 # ---------------------------------------------------------------- hub connection
+# The connection to the hub: sends hello, runs a background reader thread, offers send helpers.
 class Link:
     def __init__(self, args):
         self.args = args
         host, port = args.hub.split(":")
         self.ws = WS(host, int(port), "/edge")
+        # First message: who we are, which cameras we have, and whether we want real OS mouse events.
         hello = {"t": "hello", "device": args.device, "source": args.source,
                  "cameras": list(range(len(args.cam_list))), "os_pointer": args.os_pointer,
                  "token": os.environ.get("IPS_TOKEN", "")}
         self.ws.send_text(json.dumps(hello))
         self.pointer = OsPointer() if args.os_pointer else None
         self.alive = True
+        # Read the hub's replies on a separate thread so sending is never blocked.
         threading.Thread(target=self._reader, daemon=True).start()
 
+    # Reads the hub's messages: print its greeting, apply actions as real mouse events if requested, report errors.
     def _reader(self):
         try:
+            # Keep reading messages until the connection closes.
             while True:
                 m = json.loads(self.ws.recv_text())
                 if m.get("t") == "hello_ack":
@@ -116,22 +149,27 @@ class Link:
         except (WSClosed, OSError):
             self.alive = False
 
+    # Send one JSON message (compact form, to keep it small).
     def send(self, msg):
         self.ws.send_text(json.dumps(msg, separators=(",", ":")))
 
+    # Send a camera JPEG as a binary message: one byte for the camera index, then the image bytes.
     def send_jpeg(self, cam, jpeg):
         self.ws.send_binary(bytes([cam]) + jpeg)
 
 
+# Turns hub actions into real operating-system mouse events.
 class OsPointer:
     """Turns hub actions into real OS mouse events, so any window (e.g. a real browser) can be driven."""
 
     def __init__(self):
+        # Imported only when --os-pointer is used, so the simulator needs no extra packages.
         import pyautogui  # pip install pyautogui
         pyautogui.PAUSE = 0
         pyautogui.FAILSAFE = False
         self.g = pyautogui
 
+    # Translate one hub action into a real mouse move / press / release / arrow-key press.
     def apply(self, a):
         k = a.get("kind")
         if k in ("move", "down", "up"):
@@ -145,11 +183,14 @@ class OsPointer:
 
 
 # ---------------------------------------------------------------- sources
+# Fake-hand source: sends the scripted hands at the chosen frame rate for each camera.
 def run_synthetic(link, args):
+    # A fixed random seed makes every run identical.
     rng = random.Random(7)
     seq = [0] * len(args.cam_list)
     t0 = time.time()
     n = 0
+    # Each tick: send one frame per camera, then sleep to keep a steady frame rate.
     while link.alive:
         now = time.time() - t0
         if args.seconds and now > args.seconds:
@@ -163,6 +204,7 @@ def run_synthetic(link, args):
             time.sleep(delay)
 
 
+# Replay source: re-send the hand messages from a recording made by the hub.
 def run_replay(link, args):
     rows = []
     with open(args.replay, encoding="utf-8") as f:
@@ -173,6 +215,7 @@ def run_replay(link, args):
     if not rows:
         print("no hand frames in", args.replay)
         return
+    # Keep the original spacing between frames, but stamp each message with the current time.
     t0, r0 = time.time(), rows[0]["ts"]
     for m in rows:
         wait = t0 + (m["ts"] - r0) / 1e6 - time.time()
@@ -185,9 +228,11 @@ def run_replay(link, args):
     print("replayed", len(rows), "frames", flush=True)
 
 
+# Real-camera source: grab frames, run MediaPipe hand tracking, send the landmarks (and optionally JPEGs).
 def run_camera(link, args):
     import cv2
     import mediapipe as mp
+    # Choose between Pi CSI cameras (picamera2) and USB / V4L2 cameras (OpenCV).
     use_pi = args.source == "picamera"
     if use_pi:
         from picamera2 import Picamera2
@@ -199,6 +244,7 @@ def run_camera(link, args):
             cams.append(p)
     else:
         cams = [cv2.VideoCapture(c) for c in args.cam_list]
+    # One MediaPipe tracker per camera, because each keeps its own tracking state between frames.
     trackers = [mp.solutions.hands.Hands(max_num_hands=1, model_complexity=0, min_detection_confidence=0.5,
                                          min_tracking_confidence=0.5) for _ in cams]
     seq = [0] * len(cams)
@@ -215,9 +261,11 @@ def run_camera(link, args):
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             ts = int(time.time() * 1e6)
             t0 = time.perf_counter()
+            # Run hand tracking and time it: this 'track_ms' is what the benchmark compares.
             res = trackers[i].process(rgb)
             track_ms = (time.perf_counter() - t0) * 1000
             hands = []
+            # Convert MediaPipe's result into our JSON format (21 [x, y, z] points per hand).
             if res.multi_hand_landmarks:
                 for lm, hd in zip(res.multi_hand_landmarks, res.multi_handedness):
                     hands.append({"right": hd.classification[0].label == "Right",
@@ -225,6 +273,7 @@ def run_camera(link, args):
                                   "pts": [[p.x, p.y, p.z] for p in lm.landmark]})
             link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
             seq[i] += 1
+            # Optionally also send the camera image so the hub can store video.
             if args.send_frames:
                 ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if ok:
@@ -232,6 +281,7 @@ def run_camera(link, args):
 
 
 # ---------------------------------------------------------------- main
+# Read the command line, pick the source, and keep reconnecting if the hub goes away.
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hub", default="127.0.0.1:8080")
@@ -245,7 +295,9 @@ def main():
     ap.add_argument("--device", default="pi5")
     args = ap.parse_args()
     args.cam_list = args.cams
+    # Map the chosen --source to the function that implements it.
     runner = {"synthetic": run_synthetic, "replay": run_replay, "camera": run_camera, "picamera": run_camera}[args.source]
+    # Connect and run; on connection failure wait 2 seconds and try again.
     while True:
         try:
             link = Link(args)

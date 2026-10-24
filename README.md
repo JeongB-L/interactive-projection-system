@@ -46,7 +46,7 @@ Projector <- HDMI <- Pi browser showing display page <-- actions --+
 
 | Path | What |
 |---|---|
-| `hub/src/` | C++20 hub: gesture engine, calibration math, fusion, storage, HTTP/WebSocket server |
+| `hub/src/` | C++20 hub (every file starts with a "what this file does" header and is commented chunk by chunk): gesture engine, calibration math, fusion, storage, HTTP/WebSocket server |
 | `hub/tests/` | unit tests (`python ips.py test`) |
 | `edge/agent.py` | Pi-side agent: synthetic hands, replay, or real cameras + MediaPipe |
 | `ui/` | display page and apps |

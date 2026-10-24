@@ -1,24 +1,42 @@
+// // config.json: hub settings. (The hub's reader accepts // comments; edit values, then `python ips.py stop` and `start`.)
 {
+  // Port the hub listens on (the display page is http://<laptop>:8080/ui/display.html).
   "port": 8080,
+  // Network interface to listen on: 0.0.0.0 = all (so the Pi can connect), 127.0.0.1 = this computer only.
   "bind": "0.0.0.0",
+  // Projector size in pixels until the display page reports its real size.
   "screen_w": 1920,
   "screen_h": 1080,
+  // SQLite database: an INDEX of stored files (keys and URIs), never the files themselves.
   "db_path": "data/ips.db",
+  // Where the files (video, recordings) are stored. Local folder; other stores need new code.
   "blob_uri": "file:./data/blobs",
+  // Where the camera-to-projector calibration is saved.
   "calib_path": "data/calibration.json",
+  // What to record. Hand landmarks are small; camera video (frames) is large and private, so it is OFF by default.
   "record": { "landmarks": true, "frames": false },
+  // Gesture detection tuning (used by the default rule-based recognizer):
   "gesture": {
+    // Pinch starts below this thumb-index distance (relative to hand size)...
     "pinch_close": 0.25,
+    // ...and ends above this one (bigger than the first, so a pinch does not flicker).
     "pinch_open": 0.40,
+    // Open-palm swipe: minimum speed in screen widths per second, measured over the window below...
     "swipe_min_speed": 1.2,
     "swipe_window_ms": 250,
+    // ...and the minimum time between two swipes.
     "swipe_cooldown_ms": 400,
+    // Cursor movements smaller than this many pixels are ignored (hides jitter).
     "dead_zone_px": 6,
+    // Cursor smoothing: lower = smoother but laggier when still; beta: higher = less lag when moving fast.
     "min_cutoff": 1.0,
     "beta": 0.02,
+    // Hold an open palm still this long to go back to the launcher.
     "home_hold_ms": 1000,
+    // A camera that has been silent this long is ignored (so a frozen camera cannot move the cursor).
     "stale_ms": 150
   },
+  // Apps shown in the launcher. 'url' may be a page served by the hub (/apps/...) or any web address.
   "apps": [
     { "id": "browser", "name": "Browser", "url": "https://en.wikipedia.org", "needs_internet": true },
     { "id": "ai", "name": "AI chat", "url": "/apps/ai.html", "needs_internet": true },

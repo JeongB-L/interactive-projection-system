@@ -1,3 +1,13 @@
+// storage.cpp
+// ---------------------------------------------------------------------------
+// WHAT THIS FILE DOES
+//   Implements storage (see storage.hpp):
+//     - writing files into a local folder (the "blob store"),
+//     - the SQLite catalog that records WHERE each file is (key + URI), not its contents,
+//     - the SessionRecorder that, while a Pi is connected, writes hand events and camera video
+//       into files and registers them in the catalog.
+//   Why this split: ML jobs later loop over the catalog rows and open each file by its URI.
+// ---------------------------------------------------------------------------
 #include "storage.hpp"
 
 #include <sqlite3.h>
@@ -9,6 +19,7 @@
 namespace ips {
 namespace fs = std::filesystem;
 
+// Current UTC time as an ISO-8601 string. gmtime has different names on Windows and POSIX.
 std::string utc_now_iso() {
   std::time_t t = std::time(nullptr);
   std::tm tm{};
@@ -24,6 +35,7 @@ std::string utc_now_iso() {
 
 // ---- blob store ------------------------------------------------------------
 namespace {
+// Writes one local file, counting the bytes so the catalog can store the final size.
 class LocalWriter : public BlobWriter {
  public:
   explicit LocalWriter(const fs::path& p) : out_(p, std::ios::binary) {
@@ -45,24 +57,29 @@ class LocalWriter : public BlobWriter {
 };
 }  // namespace
 
+// Remember the (absolute) root folder and make sure it exists.
 LocalFsBlobStore::LocalFsBlobStore(fs::path root) : root_(fs::absolute(std::move(root))) {
   fs::create_directories(root_);
 }
 
+// The store's base location as a file:/// URI.
 std::string LocalFsBlobStore::base_uri() const {
   return "file:///" + root_.generic_string();
 }
 
+// A file's full URI = base + "/" + key.
 std::string LocalFsBlobStore::uri(const std::string& key) const {
   return base_uri() + "/" + key;
 }
 
+// Create any missing sub-folders, then open the file for writing.
 std::unique_ptr<BlobWriter> LocalFsBlobStore::create(const std::string& key) {
   fs::path p = root_ / key;
   fs::create_directories(p.parent_path());
   return std::make_unique<LocalWriter>(p);
 }
 
+// Choose a store from the config string. Only "file:" is supported.
 std::unique_ptr<IBlobStore> make_blob_store(const std::string& blob_uri) {
   if (blob_uri.rfind("file:", 0) == 0) {
     std::string p = blob_uri.substr(5);
@@ -74,24 +91,30 @@ std::unique_ptr<IBlobStore> make_blob_store(const std::string& blob_uri) {
 }
 
 // ---- catalog ---------------------------------------------------------------
+
+// Open (or create) the database file and make sure the two tables exist.
 Catalog::Catalog(const std::string& path) {
   auto parent = fs::path(path).parent_path();
   if (!parent.empty()) fs::create_directories(parent);
   if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK)
     throw std::runtime_error(std::string("sqlite open failed: ") + sqlite3_errmsg(db_));
-  exec("PRAGMA journal_mode=WAL;");
+  exec("PRAGMA journal_mode=WAL;"); // lets other programs read while the hub writes
+  // sessions: one row per Pi connection.
   exec("CREATE TABLE IF NOT EXISTS sessions("
        "id INTEGER PRIMARY KEY, started_utc TEXT, ended_utc TEXT, device TEXT, source TEXT, meta TEXT);");
+  // assets: one row per stored file. Only the location and facts about it, never the bytes.
   exec("CREATE TABLE IF NOT EXISTS assets("
        "id INTEGER PRIMARY KEY, session_id INTEGER, kind TEXT, key TEXT UNIQUE, uri TEXT, "
        "bytes INTEGER, meta TEXT, created_utc TEXT);");
   exec("CREATE INDEX IF NOT EXISTS assets_kind ON assets(kind);");
 }
 
+// Close the database when the hub exits.
 Catalog::~Catalog() {
   if (db_) sqlite3_close(db_);
 }
 
+// Run one SQL statement and turn any failure into a C++ exception.
 void Catalog::exec(const char* sql) {
   char* err = nullptr;
   if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -102,6 +125,7 @@ void Catalog::exec(const char* sql) {
 }
 
 namespace {
+// Tiny RAII wrapper: prepares a statement and always releases it, even if an exception is thrown.
 struct Stmt {
   sqlite3_stmt* s = nullptr;
   Stmt(sqlite3* db, const char* sql) {
@@ -113,6 +137,7 @@ struct Stmt {
 };
 }  // namespace
 
+// Insert a session row and return its new id.
 int64_t Catalog::begin_session(const std::string& device, const std::string& source, const json& meta) {
   std::lock_guard lk(m_);
   Stmt st(db_, "INSERT INTO sessions(started_utc,device,source,meta) VALUES(?,?,?,?)");
@@ -121,6 +146,7 @@ int64_t Catalog::begin_session(const std::string& device, const std::string& sou
   return sqlite3_last_insert_rowid(db_);
 }
 
+// Stamp the session's end time.
 void Catalog::end_session(int64_t id) {
   std::lock_guard lk(m_);
   Stmt st(db_, "UPDATE sessions SET ended_utc=? WHERE id=?");
@@ -129,6 +155,7 @@ void Catalog::end_session(int64_t id) {
   sqlite3_step(st.s);
 }
 
+// Register one stored file (its key, full URI, size and extra facts).
 int64_t Catalog::add_asset(int64_t session, const std::string& kind, const std::string& key,
                            const std::string& uri, uint64_t bytes, const json& meta) {
   std::lock_guard lk(m_);
@@ -142,6 +169,7 @@ int64_t Catalog::add_asset(int64_t session, const std::string& kind, const std::
   return sqlite3_last_insert_rowid(db_);
 }
 
+// A file's size is only known when it is finished, so it is updated afterwards.
 void Catalog::set_asset_bytes(int64_t id, uint64_t bytes) {
   std::lock_guard lk(m_);
   Stmt st(db_, "UPDATE assets SET bytes=? WHERE id=?");
@@ -150,11 +178,13 @@ void Catalog::set_asset_bytes(int64_t id, uint64_t bytes) {
   sqlite3_step(st.s);
 }
 
+// Read a text column safely (NULL becomes an empty string).
 static std::string col(sqlite3_stmt* s, int i) {
   const unsigned char* t = sqlite3_column_text(s, i);
   return t ? reinterpret_cast<const char*>(t) : "";
 }
 
+// List recent sessions as JSON (used by `ips.py sessions` and /api/sessions).
 json Catalog::sessions(int limit) {
   std::lock_guard lk(m_);
   Stmt st(db_, "SELECT id,started_utc,ended_utc,device,source,meta FROM sessions ORDER BY id DESC LIMIT ?");
@@ -167,6 +197,8 @@ json Catalog::sessions(int limit) {
   return out;
 }
 
+// List stored files as JSON, optionally filtered by kind and/or session.
+// The SQL text is built from fixed pieces only; user values are always bound as parameters.
 json Catalog::assets(const std::string& kind, int64_t session, int limit) {
   std::lock_guard lk(m_);
   std::string sql = "SELECT id,session_id,kind,key,uri,bytes,meta,created_utc FROM assets WHERE 1=1";
@@ -174,6 +206,7 @@ json Catalog::assets(const std::string& kind, int64_t session, int limit) {
   if (session) sql += " AND session_id=?";
   sql += " ORDER BY id DESC LIMIT ?";
   Stmt st(db_, sql.c_str());
+  // Bind only the filters that were actually added above, in order.
   int i = 1;
   if (!kind.empty()) st.text(i++, kind);
   if (session) sqlite3_bind_int64(st.s, i++, session);
@@ -188,10 +221,13 @@ json Catalog::assets(const std::string& kind, int64_t session, int limit) {
 }
 
 // ---- recorder --------------------------------------------------------------
+
+// Start a recording: create the session row, and (if enabled) the events file with its catalog row.
 SessionRecorder::SessionRecorder(Catalog& cat, IBlobStore& blobs, const std::string& device,
                                  const std::string& source, bool landmarks, bool frames)
     : cat_(cat), blobs_(blobs), landmarks_(landmarks), frames_(frames) {
   sid_ = cat_.begin_session(device, source, {{"record_landmarks", landmarks}, {"record_frames", frames}});
+  // A file-name-safe timestamp ("2026-10-24T18-40-51Z": colons are not allowed in Windows file names).
   stamp_ = utc_now_iso();
   for (auto& c : stamp_) if (c == ':') c = '-';
   if (landmarks_) {
@@ -201,8 +237,10 @@ SessionRecorder::SessionRecorder(Catalog& cat, IBlobStore& blobs, const std::str
   }
 }
 
+// Make sure files are finished even if close() was never called explicitly.
 SessionRecorder::~SessionRecorder() { close(); }
 
+// Append one JSON event as a line of text. Flushed every 50 lines so a crash loses little.
 void SessionRecorder::event(const json& ev) {
   std::lock_guard lk(m_);
   if (!events_.w || closed_) return;
@@ -211,6 +249,7 @@ void SessionRecorder::event(const json& ev) {
   if (++lines_ % 50 == 0) events_.w->flush();
 }
 
+// Append one camera JPEG. The first frame from a camera creates that camera's video file + catalog row.
 void SessionRecorder::frame(int cam, const uint8_t* jpeg, size_t n) {
   std::lock_guard lk(m_);
   if (!frames_ || closed_) return;
@@ -226,6 +265,7 @@ void SessionRecorder::frame(int cam, const uint8_t* jpeg, size_t n) {
   it->second.w->write(jpeg, n);  // concatenated JPEGs are a valid MJPEG stream (ffmpeg -f mjpeg)
 }
 
+// Finish: close every file, record its final size, and stamp the session end. Safe to call twice.
 void SessionRecorder::close() {
   std::lock_guard lk(m_);
   if (closed_) return;

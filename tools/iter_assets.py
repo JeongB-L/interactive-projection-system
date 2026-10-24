@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# tools/iter_assets.py
+# ---------------------------------------------------------------------------
+# WHAT THIS FILE DOES
+#   A small example of how a machine-learning job would use the stored data: loop over every row
+#   of the SQLite catalog, resolve each file's URI, and read the file. The database holds only
+#   pointers; this script follows them.
+# ---------------------------------------------------------------------------
 """Example: walk every stored file listed in the SQLite catalog (what an ML job would do).
 
   python tools/iter_assets.py                      # list everything
@@ -13,23 +20,31 @@ import sqlite3
 import sys
 from urllib.parse import unquote, urlparse
 
+# The repo folder (the database lives in data/ips.db under it).
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# Turn a file:// URI into an open file. This is the ONE place to change if the files
+# ever live somewhere else (another storage type needs its own reader here).
 def open_uri(uri):
+    # Split the URI into scheme and path.
     u = urlparse(uri)
     if u.scheme == "file":
         path = unquote(u.path)
+        # On Windows a file URI looks like /C:/..., so remove the leading slash.
         if os.name == "nt" and path.startswith("/") and len(path) > 2 and path[2] == ":":
             path = path[1:]
         return open(path, "rb")
+    # Any scheme other than file:// has no reader yet.
     raise NotImplementedError("add a reader for %s:// here" % u.scheme)
 
 
+# Yield one dict per database row (optionally only one kind): the loop an ML job would use.
 def iter_assets(db, kind=None):
     con = sqlite3.connect(db)
     q = "SELECT id, session_id, kind, key, uri, bytes FROM assets"
     args = ()
+    # Optional filter, e.g. only camera video.
     if kind:
         q += " WHERE kind = ?"
         args = (kind,)
@@ -37,11 +52,13 @@ def iter_assets(db, kind=None):
         yield dict(zip(("id", "session", "kind", "key", "uri", "bytes"), row))
 
 
+# Command-line demo: read every listed file and print its size.
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.path.join(ROOT, "data", "ips.db"))
     ap.add_argument("--kind")
     a = ap.parse_args()
+    # Count how many files were read successfully.
     total = 0
     for r in iter_assets(a.db, a.kind):
         try:
