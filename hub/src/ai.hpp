@@ -10,10 +10,11 @@
 
 #include "common.hpp"
 
-namespace ips {
+namespace ips
+{
 
-// Returns {"ok":true,"text":...} or {"ok":false,"error":...}. `status` receives the HTTP status
-// the hub should answer with (200 ok, 503 not configured, 502 provider unreachable, or the provider's).
-json ai_ask(const std::string& prompt, int& status);
+	// Returns {"ok":true,"text":...} or {"ok":false,"error":...}. `status` receives the HTTP status
+	// the hub should answer with (200 ok, 503 not configured, 502 provider unreachable, or the provider's).
+	json ai_ask(const std::string &prompt, int &status);
 
-}  // namespace ips
+} // namespace ips
