@@ -58,3 +58,237 @@ Projector <- HDMI <- Pi browser showing display page <-- actions --+
 ## Not done yet
 
 Real-Pi testing and calibration accuracy, true stereo 3D touch, hub-side hand tracking for non-Pi-5 devices, scroll gesture, Python binding of the gesture engine. Cloud storage is intentionally not built: everything is stored locally, so the project costs nothing to run.
+
+## ADD THESE FOR PI
+
+# Raspberry Pi Hand Tracking V2
+
+A lightweight, real-time hand-tracking application optimized for Raspberry Pi. Supports two-hand detection, fast-motion tracking, gesture recognition, and performance benchmarking using MediaPipe and OpenCV.
+
+## 1. Navigate to the Project
+
+After extracting `pi_hand_tracking_v2.zip`, open a terminal and navigate to the project directory:
+
+```bash
+cd ~/Downloads/pi_hand_tracking_v2
+```
+
+Adjust the path if the folder was extracted elsewhere.
+
+## 2. Install Dependencies
+
+Update the Raspberry Pi and install the required system packages:
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-opencv python3-picamera2
+```
+
+Create and activate a Python virtual environment:
+
+```bash
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+```
+
+Install the project dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+## 3. Download the MediaPipe Model
+
+```bash
+python download_model.py
+```
+
+This downloads the hand-tracking model required for inference.
+
+## 4. Run Hand Tracking
+
+### Option A: Raspberry Pi Camera Module (CSI)
+
+```bash
+python main.py --backend picamera2 --show
+```
+
+### Option B: USB Webcam
+
+```bash
+python main.py --camera 0 --show
+```
+
+The application opens a camera preview displaying detected hands, tracking IDs, and motion information.
+
+Press `Q` to exit.
+
+## 5. Fast-Motion Tracking
+
+For improved tracking during rapid hand movements, use a shorter camera exposure:
+
+```bash
+python main.py --backend picamera2 \
+  --fps 30 \
+  --exposure-us 5000 \
+  --gain 4 \
+  --show
+```
+
+**Recommended conditions:**
+
+- Use bright, consistent lighting.
+- Keep both hands within the camera frame.
+- Avoid backgrounds with excessive visual clutter.
+- Adjust exposure and gain based on lighting.
+- Minimize camera motion during testing.
+
+A shorter exposure reduces motion blur but requires sufficient lighting.
+
+## 6. Performance Benchmarking
+
+Run a 30-second benchmark using the Raspberry Pi Camera Module:
+
+```bash
+python main.py --backend picamera2 \
+  --show \
+  --seconds 30 \
+  --summary benchmark.json
+```
+
+For a USB webcam:
+
+```bash
+python main.py --camera 0 \
+  --show \
+  --seconds 30 \
+  --summary benchmark.json
+```
+
+The results are saved to `benchmark.json`.
+
+The benchmark can help evaluate:
+
+- Processing frame rate (FPS)
+- Inference latency
+- Hand-detection statistics
+- Dropped frames
+
+### Suggested Test Cases
+
+| Test | Procedure | Expected Behavior |
+|---|---|---|
+| Single hand | Hold one hand still | Stable detection |
+| Two hands | Hold both hands in frame | Both hands detected |
+| Fast horizontal movement | Move hand rapidly left and right | Minimal tracking loss |
+| Fast vertical movement | Move hand rapidly up and down | Minimal tracking loss |
+| Hand crossing | Cross and separate hands | Stable tracking IDs |
+| Temporary disappearance | Move a hand outside the frame and return | Tracking recovers |
+| Pinch | Repeatedly pinch thumb and index finger | Correct pinch events |
+| Swipe | Perform left and right swipes | Correct movement direction |
+| Two-hand zoom | Move hands apart and together | Correct zoom events |
+
+## 7. Run Offline Tests
+
+Run the built-in tests without requiring a camera:
+
+```bash
+python main.py --self-test
+```
+
+These tests validate tracking and motion-processing logic. They do not replace live camera accuracy testing.
+
+## 8. Run Without a Graphical Interface
+
+For headless deployment or SSH environments, omit `--show`:
+
+```bash
+python main.py --backend picamera2
+```
+
+This avoids unnecessary graphical rendering and reduces resource usage.
+
+## 9. Reactivate the Environment
+
+Whenever you open a new terminal, navigate to the project folder and reactivate the virtual environment:
+
+```bash
+cd ~/Downloads/pi_hand_tracking_v2
+source .venv/bin/activate
+```
+
+Then launch the application:
+
+```bash
+python main.py --backend picamera2 --show
+```
+
+## 10. Troubleshooting
+
+### Camera Not Detected
+
+Check whether the Raspberry Pi recognizes the camera.
+
+For a CSI camera:
+
+```bash
+rpicam-hello --list-cameras
+```
+
+For a USB webcam:
+
+```bash
+ls /dev/video*
+```
+
+### Python Module Not Found
+
+Make sure the virtual environment is active:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+### Low FPS
+
+Try the following:
+
+- Close unnecessary applications.
+- Disable the graphical preview.
+- Reduce the camera resolution if supported by the application.
+- Ensure the Raspberry Pi is adequately cooled.
+- Avoid running unnecessary processes alongside inference.
+
+### Poor Fast-Motion Detection
+
+- Increase ambient lighting.
+- Reduce camera exposure time.
+- Confirm that the actual capture FPS is sufficiently high.
+- Check whether tracking fails because of motion blur or inference latency.
+
+## 11. Performance Goals
+
+These are initial evaluation targets, not guaranteed results.
+
+| Metric | Target |
+|---|---|
+| Maximum simultaneous hands | 2 |
+| Processing FPS | 20–30 |
+| Stable two-hand detection | ≥90% in suitable conditions |
+| Fast-swipe recognition | ≥90% |
+| Motion-to-update latency | Under 100 ms |
+| Resource usage | Suitable for Raspberry Pi deployment |
+
+Actual performance depends on the Raspberry Pi model, camera, lighting, and inference configuration.
+
+## Project Objective
+
+Develop a reliable, low-latency hand-tracking system for the Interactive Projection System that prioritizes:
+
+1. Accurate simultaneous detection of two hands.
+2. Responsive tracking during fast movement.
+3. Stable tracking identities and reduced jitter.
+4. Low CPU and memory overhead.
+5. Compatibility with Raspberry Pi hardware.
+6. Minimal graphical overhead for production deployment.
