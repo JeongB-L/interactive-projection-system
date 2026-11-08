@@ -72,10 +72,12 @@ namespace ips
 		fs::create_directories(root_);
 	}
 
-	// The store's base location as a file:/// URI.
+	// The store's base location as a file:/// URI. Linux paths already start with "/"
+	// (file:// + /home/pi/...), Windows paths start with a drive letter (file:/// + C:/...).
 	std::string LocalFsBlobStore::base_uri() const
 	{
-		return "file:///" + root_.generic_string();
+		std::string p = root_.generic_string();
+		return (!p.empty() && p[0] == '/' ? "file://" : "file:///") + p;
 	}
 
 	// A file's full URI = base + "/" + key.

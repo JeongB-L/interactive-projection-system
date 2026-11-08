@@ -39,10 +39,24 @@ python3 ips.py test
 
 if [[ $PI == 1 ]]; then
   say "Installing Raspberry Pi agent packages"
-  if command -v apt-get >/dev/null; then sudo apt-get install -y python3-picamera2 || echo "picamera2 not available via apt (only needed for CSI cameras)"; fi
+  # picamera2 (CSI camera library) comes from apt; ydotool lets --os-pointer work on Wayland (Pi OS default desktop).
+  if command -v apt-get >/dev/null; then
+    sudo apt-get install -y python3-picamera2 || echo "picamera2 not available via apt (only needed for CSI cameras)"
+    sudo apt-get install -y ydotool || echo "ydotool not available (only needed for --os-pointer on Wayland)"
+  fi
+  # A virtual environment that can still see the apt-installed picamera2.
   python3 -m venv .venv --system-site-packages
   .venv/bin/pip install -r requirements-pi.txt
-  echo "Run the agent with:  .venv/bin/python edge/agent.py --hub <laptop-ip>:8080 --source picamera --cams 0 1 --os-pointer"
+  # The MediaPipe hand model used by the agent (about 8 MB, free, from Google's public model bucket).
+  mkdir -p models
+  if [[ ! -f models/hand_landmarker.task ]]; then
+    curl -fL -o models/hand_landmarker.task \
+      https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task \
+      || echo "model download failed; rerun ./setup.sh --pi when online"
+  fi
+  # If picamera2 and the pip-installed numpy clash ("numpy.dtype size changed"), this realigns numpy with the system one.
+  .venv/bin/python -c "import picamera2, mediapipe" 2>/dev/null || echo "NOTE: if importing picamera2 + mediapipe fails, try: .venv/bin/pip install 'numpy<2'"
+  echo "Run everything on the Pi with:  python3 ips.py pi-start      (one camera; add --os-pointer to drive real windows)"
 fi
 
 printf '\nSetup complete. Try it:\n  python3 ips.py start\n  python3 ips.py open\n  python3 ips.py sim\n  python3 ips.py stop\n'

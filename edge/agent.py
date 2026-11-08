@@ -20,7 +20,7 @@ Sources:
 
 Examples:
   python edge/agent.py --source synthetic --cams 2 --seconds 30
-  python edge/agent.py --source camera --cams 0 1 --os-pointer
+  python edge/agent.py --source picamera --os-pointer      (one camera, index 0)
 """
 import argparse
 import json
@@ -160,18 +160,48 @@ class Link:
 
 # Turns hub actions into real operating-system mouse events.
 class OsPointer:
-    """Turns hub actions into real OS mouse events, so any window (e.g. a real browser) can be driven."""
+    """Turns hub actions into real OS mouse events, so any window (e.g. a real browser) can be driven.
+    Two backends: pyautogui (Windows, macOS, Linux on X11) and ydotool (Linux on Wayland, which is
+    the Raspberry Pi OS default; needs `sudo apt install ydotool` and the ydotoold service running)."""
+
+    # Linux key codes for the arrow keys (used by ydotool).
+    KEYCODES = {"up": 103, "left": 105, "right": 106, "down": 108}
 
     def __init__(self):
+        # On a Wayland desktop pyautogui cannot move the mouse, so use ydotool there.
+        self.wayland = bool(os.environ.get("WAYLAND_DISPLAY"))
+        if self.wayland:
+            import shutil
+            if not shutil.which("ydotool"):
+                raise SystemExit("--os-pointer on Wayland needs ydotool: sudo apt install ydotool "
+                                 "(or switch the Pi to X11 in raspi-config > Advanced > Wayland)")
+            return
         # Imported only when --os-pointer is used, so the simulator needs no extra packages.
         import pyautogui  # pip install pyautogui
         pyautogui.PAUSE = 0
         pyautogui.FAILSAFE = False
         self.g = pyautogui
 
+    # Run one ydotool command without waiting for it (keeps the reader thread fast).
+    def _ydo(self, *args):
+        import subprocess
+        subprocess.Popen(["ydotool", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     # Translate one hub action into a real mouse move / press / release / arrow-key press.
     def apply(self, a):
         k = a.get("kind")
+        if self.wayland:
+            # ydotool: absolute move, left button down (0x40) / up (0x80), key press then release.
+            if k in ("move", "down", "up"):
+                self._ydo("mousemove", "--absolute", "-x", str(a["x"]), "-y", str(a["y"]))
+            if k == "down":
+                self._ydo("click", "0x40")
+            elif k == "up":
+                self._ydo("click", "0x80")
+            elif k == "swipe" and a.get("detail") in self.KEYCODES:
+                code = self.KEYCODES[a["detail"]]
+                self._ydo("key", "%d:1" % code, "%d:0" % code)
+            return
         if k in ("move", "down", "up"):
             self.g.moveTo(a["x"], a["y"], _pause=False)
         if k == "down":
@@ -228,10 +258,55 @@ def run_replay(link, args):
     print("replayed", len(rows), "frames", flush=True)
 
 
+# Hand tracker wrapper. Uses MediaPipe's current Tasks API (HandLandmarker) when the model file exists
+# (setup.sh --pi downloads it to models/hand_landmarker.task); otherwise falls back to the older
+# mp.solutions.hands API, which some MediaPipe versions still include.
+class HandTracker:
+    def __init__(self, model_path):
+        import mediapipe as mp
+        self.mp = mp
+        if model_path and os.path.exists(model_path):
+            from mediapipe.tasks import python as mpt
+            from mediapipe.tasks.python import vision
+            opts = vision.HandLandmarkerOptions(
+                base_options=mpt.BaseOptions(model_asset_path=model_path),
+                running_mode=vision.RunningMode.VIDEO, num_hands=1,
+                min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.5, min_tracking_confidence=0.5)
+            self.task = vision.HandLandmarker.create_from_options(opts)
+            self.legacy = None
+            self.last_ms = -1
+        else:
+            if not hasattr(mp, "solutions"):
+                raise SystemExit("hand model not found at %s; run ./setup.sh --pi to download it" % model_path)
+            self.task = None
+            self.legacy = mp.solutions.hands.Hands(max_num_hands=1, model_complexity=0,
+                                                   min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+    # Track hands in one RGB image; returns our JSON hand list (21 [x, y, z] points per hand).
+    def process(self, rgb):
+        hands = []
+        if self.task:
+            # VIDEO mode needs strictly increasing timestamps in milliseconds.
+            ms = max(int(time.monotonic() * 1000), self.last_ms + 1)
+            self.last_ms = ms
+            img = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
+            res = self.task.detect_for_video(img, ms)
+            for lm, hd in zip(res.hand_landmarks, res.handedness):
+                hands.append({"right": hd[0].category_name == "Right", "score": float(hd[0].score),
+                              "pts": [[p.x, p.y, p.z] for p in lm]})
+            return hands
+        res = self.legacy.process(rgb)
+        if res.multi_hand_landmarks:
+            for lm, hd in zip(res.multi_hand_landmarks, res.multi_handedness):
+                hands.append({"right": hd.classification[0].label == "Right",
+                              "score": float(hd.classification[0].score),
+                              "pts": [[p.x, p.y, p.z] for p in lm.landmark]})
+        return hands
+
+
 # Real-camera source: grab frames, run MediaPipe hand tracking, send the landmarks (and optionally JPEGs).
 def run_camera(link, args):
     import cv2
-    import mediapipe as mp
     # Choose between Pi CSI cameras (picamera2) and USB / V4L2 cameras (OpenCV).
     use_pi = args.source == "picamera"
     if use_pi:
@@ -239,38 +314,31 @@ def run_camera(link, args):
         cams = []
         for c in args.cam_list:
             p = Picamera2(c)
+            # picamera2's "RGB888" format is stored in B, G, R byte order, i.e. what OpenCV calls BGR.
             p.configure(p.create_video_configuration(main={"size": (640, 480), "format": "RGB888"}))
             p.start()
             cams.append(p)
     else:
         cams = [cv2.VideoCapture(c) for c in args.cam_list]
-    # One MediaPipe tracker per camera, because each keeps its own tracking state between frames.
-    trackers = [mp.solutions.hands.Hands(max_num_hands=1, model_complexity=0, min_detection_confidence=0.5,
-                                         min_tracking_confidence=0.5) for _ in cams]
+    # One tracker per camera, because each keeps its own tracking state between frames.
+    trackers = [HandTracker(args.model) for _ in cams]
     seq = [0] * len(cams)
     t_end = time.time() + args.seconds if args.seconds else None
     while link.alive and (t_end is None or time.time() < t_end):
         for i, cam in enumerate(cams):
+            # Get the frame as BGR (for JPEG encoding) and RGB (what MediaPipe expects).
             if use_pi:
-                rgb = cam.capture_array()
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                bgr = cam.capture_array()
             else:
                 ok, bgr = cam.read()
                 if not ok:
                     continue
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             ts = int(time.time() * 1e6)
             t0 = time.perf_counter()
             # Run hand tracking and time it: this 'track_ms' is what the benchmark compares.
-            res = trackers[i].process(rgb)
+            hands = trackers[i].process(rgb)
             track_ms = (time.perf_counter() - t0) * 1000
-            hands = []
-            # Convert MediaPipe's result into our JSON format (21 [x, y, z] points per hand).
-            if res.multi_hand_landmarks:
-                for lm, hd in zip(res.multi_hand_landmarks, res.multi_handedness):
-                    hands.append({"right": hd.classification[0].label == "Right",
-                                  "score": float(hd.classification[0].score),
-                                  "pts": [[p.x, p.y, p.z] for p in lm.landmark]})
             link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
             seq[i] += 1
             # Optionally also send the camera image so the hub can store video.
@@ -286,7 +354,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hub", default="127.0.0.1:8080")
     ap.add_argument("--source", choices=["synthetic", "replay", "camera", "picamera"], default="synthetic")
-    ap.add_argument("--cams", nargs="+", type=int, default=[0, 1], help="camera indices, e.g. 0 1 (synthetic: only the count matters)")
+    ap.add_argument("--cams", nargs="+", type=int, default=[0], help="camera indices; default one camera (0). e.g. 0 1 for two (synthetic: only the count matters)")
+    ap.add_argument("--model", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "hand_landmarker.task"),
+                    help="MediaPipe hand model file (downloaded by setup.sh --pi)")
     ap.add_argument("--fps", type=float, default=30)
     ap.add_argument("--seconds", type=float, default=0, help="0 = run until stopped")
     ap.add_argument("--replay", help="events.ndjson recorded by the hub")

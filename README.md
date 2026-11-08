@@ -1,7 +1,7 @@
 # Interactive Projection System
 
-A projector shows a UI on a flat surface; two cameras watch the user's hand over the image; hand gestures change what is shown.
-Raspberry Pi 5 (8 GB) + 2 camera modules + small projector, with a C++ backend ("hub") on a laptop.
+A projector shows a UI on a flat surface; a camera watches the user's hand over the image; hand gestures change what is shown.
+Raspberry Pi 5 (8 GB) + 1 camera module + small projector. The C++ backend ("hub") can run on a laptop or on the Pi itself.
 Class project by Jeongbin, Johnny, Nina, and Aneesh.
 
 **Status: working prototype, tested in simulation.** Everything runs on one laptop with a fake Pi. The real Pi, cameras, MediaPipe path and projector have not been tested yet (see [docs/SPEC.md](docs/SPEC.md), section 8).
@@ -17,12 +17,23 @@ Needs Python 3.8+ and an internet connection for the first install. The script i
 
 Fork or clone first: `git clone https://github.com/JeongB-L/interactive-projection-system && cd interactive-projection-system`. The AI app is optional: put an API key in `.env` (created by the script); everything else works without it. Details and manual steps: [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
+## Run everything on the Raspberry Pi
+
+The hub, the camera agent and the projected page can all run on the Pi 5 (no laptop needed):
+```bash
+./setup.sh --pi                   # once: toolchain, build, tests, camera + MediaPipe packages, hand model
+python3 ips.py pi-start           # hub + camera agent + fullscreen display on the projector
+python3 ips.py stop               # stops all of it
+python3 ips.py install-autostart  # optional: start automatically when the Pi's desktop logs in
+```
+Untested on real hardware so far; see docs/RUNBOOK.md ("Real Pi") for what to check first.
+
 ## Try it (2 minutes, no hardware)
 
 ```bash
 python ips.py start      # background hub (builds first if needed)
 python ips.py open       # projected display page
-python ips.py sim        # fake 2-camera Pi: red dot follows the fingertip, pinch clicks, swipe steers
+python ips.py sim        # fake Pi with 1 camera: red dot follows the fingertip, pinch clicks, swipe steers
 python ips.py status
 python ips.py stop
 ```
@@ -31,13 +42,13 @@ Setup and all commands: **[docs/RUNBOOK.md](docs/RUNBOOK.md)**.
 ## How it works
 
 ```
-Cam0 + Cam1 -> Pi agent (MediaPipe, Python) --JSON/WebSocket--> HUB (C++)
-                                                                  |  fuse both cameras -> gestures -> projector pixels
+Camera -> Pi agent (MediaPipe, Python) --JSON/WebSocket--> HUB (C++, on the Pi or a laptop)
+                                                                  |  (fuse cameras) -> gestures -> projector pixels
 Projector <- HDMI <- Pi browser showing display page <-- actions --+
                                                                   +--> blob files (video, logs) + SQLite index
 ```
 - **Landmarks, not video**, travel from the Pi to the hub (about 1 KB per frame), so the loop stays fast.
-- **Two cameras are fused** by confidence, only across cameras that agree on the hand pose.
+- **One camera by default.** More cameras are supported and fused by confidence (only across cameras that agree on the hand pose), e.g. `--cams 0 1`.
 - **Gestures:** point = cursor, pinch = click/drag, open-palm swipe = left/right/up/down, open palm held still = home.
 - **Apps** are web pages (launcher, Snake, AI chat, browser). The AI key lives in `.env` on the hub only.
 - **Storage:** video and recordings are files in a blob store (a local folder; the interface allows other stores later); SQLite stores only each file's key and URI, so ML jobs can loop over the table.

@@ -14,7 +14,9 @@
   python ips.py start            start the hub in the background
   python ips.py stop             stop the simulator and the hub (recording is flushed)
   python ips.py status           show what the hub sees
-  python ips.py sim              start a fake 2-camera Pi (--seconds N, --cams N)
+  python ips.py sim              start a fake Pi with 1 camera (--seconds N, --cams N)
+  python ips.py pi-start         ON THE PI: hub + camera agent + fullscreen display in one go
+  python ips.py install-autostart  ON THE PI: run pi-start automatically at desktop login
   python ips.py open             open the projected display page (and `open status` for the status page)
   python ips.py launch snake     switch app (browser | ai | snake | launcher | any URL)
   python ips.py home             back to the launcher
@@ -48,8 +50,15 @@ BUILD = os.path.join(ROOT, "build")
 EXE = os.path.join(BUILD, "ipsd.exe" if os.name == "nt" else "ipsd")
 HUB_PID = os.path.join(DATA, "hub.pid")
 SIM_PID = os.path.join(DATA, "sim.pid")
+AGENT_PID = os.path.join(DATA, "agent.pid")   # real camera agent started by pi-start
+KIOSK_PID = os.path.join(DATA, "kiosk.pid")   # fullscreen browser started by pi-start
 LOG = os.path.join(DATA, "logs", "hub.log")
 SIM_LOG = os.path.join(DATA, "logs", "sim.log")
+AGENT_LOG = os.path.join(DATA, "logs", "agent.log")
+KIOSK_LOG = os.path.join(DATA, "logs", "kiosk.log")
+# Python used for the camera agent: the Pi's .venv (made by setup.sh --pi, has MediaPipe) if present.
+VENV_PY = os.path.join(ROOT, ".venv", "Scripts" if os.name == "nt" else "bin", "python.exe" if os.name == "nt" else "python")
+AGENT_PY = VENV_PY if os.path.exists(VENV_PY) else sys.executable
 # Where the hub listens (override with the IPS_URL environment variable).
 BASE = os.environ.get("IPS_URL", "http://127.0.0.1:8080")
 
@@ -121,12 +130,15 @@ def alive(pid):
         return False
 
 
-# Force-stop a process (and its children on Windows).
+# Force-stop a process and its children (Windows: taskkill /T; elsewhere: its whole process group).
 def kill(pid):
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True)
     else:
-        os.kill(pid, 15)
+        try:
+            os.killpg(pid, 15)  # spawn() made the child a group leader, so this also stops its children
+        except OSError:
+            os.kill(pid, 15)
 
 
 # Start a program in the background, detached from this terminal, sending its output to a log file,
@@ -138,8 +150,11 @@ def spawn(cmd, log, pidfile):
     flags = 0
     if os.name == "nt":
         flags = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED | NEW_PROCESS_GROUP | NO_WINDOW
+    # On Linux/macOS, start_new_session puts the child in its own session, so closing the terminal
+    # or SSH connection (which sends a hang-up signal) does not kill it.
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=out, stderr=out, stdin=subprocess.DEVNULL,
-                         creationflags=flags, env=tool_env(), close_fds=True)
+                         creationflags=flags, env=tool_env(), close_fds=True,
+                         start_new_session=(os.name != "nt"))
     open(pidfile, "w").write(str(p.pid))
     return p.pid
 
@@ -178,13 +193,15 @@ def cmd_start(a):
     sys.exit("hub did not come up; see: python ips.py logs")
 
 
-# `stop`: stop the simulator, then ask the hub to shut down cleanly (which saves recordings).
+# `stop`: stop the simulator / camera agent / kiosk browser, then ask the hub to shut down cleanly
+# (which saves recordings).
 def cmd_stop(a):
-    # Stop the fake Pi first, if one is running.
-    pid = read_pid(SIM_PID)
-    if pid and alive(pid):
-        kill(pid)
-        print("simulator stopped")
+    # Stop the hand sources and the kiosk first, if running.
+    for pidfile, name in ((SIM_PID, "simulator"), (AGENT_PID, "camera agent"), (KIOSK_PID, "kiosk browser")):
+        pid = read_pid(pidfile)
+        if pid and alive(pid):
+            kill(pid)
+            print(name, "stopped")
     if hub_up():
         # Ask the hub to shut down cleanly, then wait for it to disappear.
         api("/api/shutdown", {})
@@ -199,7 +216,7 @@ def cmd_stop(a):
         kill(pid)
         print("hub force-stopped")
     # Remove the leftover pid files.
-    for p in (HUB_PID, SIM_PID):
+    for p in (HUB_PID, SIM_PID, AGENT_PID, KIOSK_PID):
         if os.path.exists(p):
             os.remove(p)
 
@@ -233,6 +250,55 @@ def cmd_sim(a):
            "--cams", *[str(i) for i in range(a.cams)], "--seconds", str(a.seconds)]
     pid = spawn(cmd, SIM_LOG, SIM_PID)
     print("simulator started (pid %d), %d camera(s), %s" % (pid, a.cams, ("%ss" % a.seconds) if a.seconds else "until `stop`"))
+
+
+# `pi-start`: everything on one machine (the Raspberry Pi): hub + camera agent + fullscreen display.
+def cmd_pi_start(a):
+    # 1. The hub.
+    cmd_start(a)
+    # 2. The hand source (real camera by default), talking to the local hub.
+    pid = read_pid(AGENT_PID)
+    if pid and alive(pid):
+        print("camera agent already running (pid %d)" % pid)
+    else:
+        cmd = [AGENT_PY, os.path.join(ROOT, "edge", "agent.py"), "--hub", BASE.split("//", 1)[1],
+               "--source", a.source, "--cams", *[str(c) for c in a.cams]]
+        if a.os_pointer:
+            cmd.append("--os-pointer")
+        pid = spawn(cmd, AGENT_LOG, AGENT_PID)
+        print("camera agent started (pid %d): source %s, camera(s) %s  (log: %s)" % (pid, a.source, a.cams, AGENT_LOG))
+    # 3. The projected page in a fullscreen browser on this machine's display (the projector).
+    if a.no_kiosk:
+        return
+    pid = read_pid(KIOSK_PID)
+    if pid and alive(pid):
+        return print("kiosk browser already running (pid %d)" % pid)
+    browser = next((b for b in ("chromium-browser", "chromium", "google-chrome", "msedge") if shutil.which(b)), None)
+    if not browser:
+        return print("no Chromium found; open %s/ui/display.html fullscreen yourself" % BASE)
+    profile = os.path.join(DATA, "kiosk-profile")  # separate profile so it never touches your normal browser
+    pid = spawn([browser, "--kiosk", "--noerrdialogs", "--disable-infobars", "--no-first-run",
+                 "--password-store=basic", "--user-data-dir=" + profile, BASE + "/ui/display.html"], KIOSK_LOG, KIOSK_PID)
+    print("kiosk browser started (pid %d). `python3 ips.py stop` ends everything." % pid)
+
+
+# `install-autostart`: start everything when the Pi's desktop logs in (Linux desktop autostart entry).
+def cmd_autostart(a):
+    path = os.path.join(os.path.expanduser("~"), ".config", "autostart", "ips.desktop")
+    if a.remove:
+        if os.path.exists(path):
+            os.remove(path)
+        return print("autostart removed")
+    if os.name == "nt":
+        sys.exit("install-autostart is for the Raspberry Pi / Linux desktop")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    cams = " ".join(str(c) for c in a.cams)
+    extra = " --os-pointer" if a.os_pointer else ""
+    with open(path, "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Interactive Projection System\n"
+                "Exec=%s %s pi-start --source %s --cams %s%s\nX-GNOME-Autostart-enabled=true\n"
+                % (sys.executable, os.path.join(ROOT, "ips.py"), a.source, cams, extra))
+    print("autostart installed:", path, "\nIt runs `ips.py pi-start` at desktop login. Remove with: install-autostart --remove")
 
 
 # `open`: open the projected display page (or the status page) in the default browser.
@@ -365,7 +431,12 @@ def main():
     add("start", cmd_start)
     add("stop", cmd_stop)
     add("status", cmd_status, ("--json", dict(action="store_true")))
-    add("sim", cmd_sim, ("--seconds", dict(type=float, default=0)), ("--cams", dict(type=int, default=2)))
+    add("sim", cmd_sim, ("--seconds", dict(type=float, default=0)), ("--cams", dict(type=int, default=1)))
+    pi_args = (("--source", dict(default="picamera", choices=["picamera", "camera", "synthetic"])),
+               ("--cams", dict(type=int, nargs="+", default=[0])),
+               ("--os-pointer", dict(action="store_true")))
+    add("pi-start", cmd_pi_start, *pi_args, ("--no-kiosk", dict(action="store_true")))
+    add("install-autostart", cmd_autostart, *pi_args, ("--remove", dict(action="store_true")))
     add("open", cmd_open, ("page", dict(nargs="?", default="display", choices=["display", "status"])))
     add("launch", cmd_launch, ("app", dict()))
     add("home", cmd_home)
@@ -375,7 +446,7 @@ def main():
     add("sessions", cmd_sessions)
     add("assets", cmd_assets, ("--kind", dict(default="")))
     add("migrate-uri", cmd_migrate, ("new_base", dict()), ("--dry-run", dict(action="store_true")))
-    add("bench", cmd_bench, ("--seconds", dict(type=int, default=15)), ("--cams", dict(type=int, default=2)),
+    add("bench", cmd_bench, ("--seconds", dict(type=int, default=15)), ("--cams", dict(type=int, default=1)),
         ("--fps", dict(type=float, default=30)))
     add("test", cmd_test)
     add("logs", cmd_logs, ("-n", dict(type=int, default=30)))

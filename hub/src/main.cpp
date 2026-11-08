@@ -7,6 +7,7 @@
 //     3. build the Hub from config.json,
 //     4. start the server (which runs until the program is stopped).
 // ---------------------------------------------------------------------------
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +15,11 @@
 
 int main(int argc, char **argv)
 {
+#ifndef _WIN32
+	// On Linux (e.g. the Raspberry Pi), writing to a connection the other side already closed raises
+	// SIGPIPE, which would kill the whole hub. Ignore it; the write just returns an error instead.
+	std::signal(SIGPIPE, SIG_IGN);
+#endif
 	// Command-line options: --config <file> chooses the settings file; --help prints usage.
 	std::string cfg_path = "config.json";
 	for (int i = 1; i < argc; ++i)

@@ -28,6 +28,9 @@ find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
+# Threads: the hub uses one thread per connection. Older Linux (e.g. older Raspberry Pi OS)
+# needs the thread library linked explicitly.
+find_package(Threads REQUIRED)
 
 # The core library: everything except main() and the server, so tests can use it too.
 add_library(ipscore STATIC
@@ -37,7 +40,7 @@ add_library(ipscore STATIC
   hub/src/ai.cpp)
 target_include_directories(ipscore PUBLIC hub/src)
 target_link_libraries(ipscore PUBLIC Boost::headers OpenSSL::SSL OpenSSL::Crypto
-                      nlohmann_json::nlohmann_json SQLite::SQLite3)
+                      nlohmann_json::nlohmann_json SQLite::SQLite3 Threads::Threads)
 # Windows needs a target-version define and the socket libraries.
 if(WIN32)
   target_compile_definitions(ipscore PUBLIC _WIN32_WINNT=0x0A00)

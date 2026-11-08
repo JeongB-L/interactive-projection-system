@@ -6,6 +6,12 @@ Related: [DESIGN.md](DESIGN.md) (rationale) · [INTERFACES.md](INTERFACES.md) (C
 **MUST** = required for the prototype, **SHOULD** = target, **MAY** = optional.
 The **Status** column says what exists in the repo today: Done (built and tested), Partial, Untested (written, no hardware to test), Not yet.
 
+## Changes in 1.3
+
+- **One camera by default** (team decision: simpler). Multi-camera fusion stays available (`--cams 0 1`).
+- **Everything can run on the Pi 5:** `ips.py pi-start` (hub + camera agent + kiosk display) and `install-autostart`. (F-34)
+- **Pi fixes from code review:** picamera2 color order (its "RGB888" is B,G,R), MediaPipe Tasks API (`HandLandmarker`) with the old API as fallback, background processes survive SSH logout, explicit thread library link, `SIGPIPE` ignored, correct `file://` URIs on Linux, `--os-pointer` works on Wayland via `ydotool`.
+
 ## Changes in 1.2
 
 - **Local only.** Cloud storage (e.g. AWS S3, a paid service) is intentionally not built; `IBlobStore` remains so it can be added later. The project has no running costs and needs no accounts.
@@ -27,13 +33,13 @@ The **Status** column says what exists in the repo today: Done (built and tested
 
 ## 1. Purpose and scope
 
-A user stands at a flat surface on which a projector shows a UI. Two cameras watch the hand over the image. Hand gestures control what is shown.
+A user stands at a flat surface on which a projector shows a UI. A camera watches the hand over the image. Hand gestures control what is shown.
 
 **In scope:** the hub (C++, on a laptop) that receives hand data from the Pi, fuses the cameras, recognizes gestures, maps them to projector coordinates, delivers actions and content to the display, and stores/measures sessions; plus a simple Pi-side agent and demo UI so the whole loop runs end to end.
 
 **Out of scope:** Pi OS setup, the final hand-tracking model, UI design polish, cloud deployment, multi-user, real authentication, true stereo triangulation.
 
-**Hardware (confirmed):** Raspberry Pi 5 (8 GB), 2 camera modules, small projector. Hub on a laptop, same LAN.
+**Hardware (confirmed):** Raspberry Pi 5 (8 GB, 125 GB disk), 1 camera module (a second is optional), small projector. The hub runs on a laptop on the same LAN, or on the Pi itself.
 
 ## 2. System context
 
@@ -52,7 +58,7 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 | F-1 | Accept hand landmark frames (21×xyz per hand, per camera) over WebSocket (PROTOCOL.md). | MUST | Done |
 | F-2 | Accept JPEG frames and obtain hand data on the hub (local model or Python worker). | SHOULD | Frames accepted and stored; hub-side tracking Not yet |
 | F-3 | Hand source selected by config, behind an interface. | MUST | Partial (agent `--source`; hub takes landmarks only) |
-| F-4 | Use both cameras: each camera has its own calibration to projector space; positions and pinch are combined by confidence-weighted fusion. One camera alone MUST also work. | MUST | Done (fusion tested in simulation) |
+| F-4 | One camera MUST work (the default). With more cameras, each has its own calibration to projector space and positions/pinch are combined by confidence-weighted fusion. | MUST | Done (1 and 2 cameras tested in simulation) |
 | F-5 | Never let stale data drive the cursor: frames older than `stale_ms` are ignored in fusion; sequence gaps are counted as drops. | MUST | Done |
 
 ### 3.2 Gestures
@@ -98,6 +104,7 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 | F-29 | **SQLite catalog** (`data/ips.db`) with tables `sessions` and `assets`. `assets` rows hold `key`, `uri`, `kind`, `bytes`, `meta` (JSON), `created_utc`, and the session id. Bulk data is never inserted into SQLite. | MUST | Done |
 | F-30 | Switching storage = change `blob_uri`; `ips.py migrate-uri OLD NEW` rewrites `uri` from `key`. | MUST | Done (rewrite only; copying the files is manual/`aws s3 sync`) |
 | F-31 | ML access: iterate over `assets` (filter by `kind`, session, date), resolve `uri`, read the blob. | MUST | Done (`tools/iter_assets.py`) |
+| F-34 | `ips.py pi-start` runs hub, camera agent and fullscreen display together on the Pi; `stop` ends all; `install-autostart` starts it at login. | SHOULD | Orchestration tested on Windows with synthetic hands; Pi path Untested |
 | F-33 | `setup.ps1` / `setup.sh` install dependencies, build, and test from a fresh clone; documented in the README. | MUST | See section 8 |
 | F-32 | CLI `ips.py`: start, stop, status, sim, open, launch, home, calibrate, apps, sessions, assets, bench, migrate-uri, logs. | MUST | Done |
 
@@ -135,7 +142,7 @@ Endpoints: `ws://hub:8080/edge`, `ws://hub:8080/display`, `GET /status`, `GET /a
 | T-5 | `migrate-uri` | URIs rewritten, keys unchanged | Done |
 | T-6 | Replay a recorded session through the hub | same gesture counts as the original run | Done |
 | T-7 | `/api/ai` with a dummy key | reaches the provider over TLS and returns its auth error; with no key returns a clear message | Done (dummy key) |
-| T-8 | Real Pi + two cameras + projector: calibration, 9-target accuracy | within 15 px (target) | Not yet (hardware) |
+| T-8 | Real Pi + camera + projector: calibration, 9-target accuracy | within 15 px (target) | Not yet (hardware) |
 | T-9 | Real latency table on the Pi | filled in | Not yet (hardware) |
 | T-10 | Projected light vs. tracking rate | rate recorded bright vs. dim | Not yet (hardware) |
 
@@ -154,7 +161,17 @@ Endpoints: `ws://hub:8080/edge`, `ws://hub:8080/display`, `GET /status`, `GET /a
 | Display page in a browser | app rendered, cursor moved, simulated pinch on a launcher tile launched Snake |
 | Bug found by testing and fixed | cameras switching pose a frame apart made fusion average two poses and fire a false swipe; fix is pose-agreement fusion plus a regression test (verified to fail without the fix) |
 
-**Not verified:** anything on the real Pi (picamera2, MediaPipe, OS pointer injection, Chromium kiosk), real latency, calibration accuracy, projector effects, Linux build, long soak tests.
+**Added 2026-11-08 (Pi changes, one camera):**
+
+| Check | Result |
+|---|---|
+| Build with explicit thread link + unit tests | 42 checks, 0 failed |
+| `ips.py pi-start --source synthetic --no-kiosk` (Windows) | hub + agent started, 1 camera at 30 fps, 0 dropped; per 12 s routine 2 down, 2 up, 1 swipe, 1 home; `stop` ended both |
+| Agent's `HandTracker` with current MediaPipe (1.2.2) on a real hand photo | Tasks API used, 1 hand found, 21 points, score 0.96; blank image: 0 hands; missing model: clear message |
+| Old `mp.solutions` API | **removed** in MediaPipe 1.2.2, so the previous agent code would have crashed; the Tasks API is now the main path |
+| Color order | on this photo, swapped colors still found the hand (0.97), so the effect on detection is smaller than first thought; recordings would still have had swapped colors, so the fix stays |
+
+**Not verified:** anything on the real Pi (picamera2 capture, MediaPipe speed on the Pi, OS pointer injection incl. ydotool, Chromium kiosk, autostart, setup.sh), real latency, calibration accuracy, projector effects, Linux build, long soak tests.
 
 ## 9. Open items
 

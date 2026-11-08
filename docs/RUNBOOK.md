@@ -17,7 +17,7 @@ On Linux use `python3` wherever this runbook says `python`.
 ```bash
 python ips.py start          # hub runs in the background
 python ips.py open           # opens the projected display page in your browser
-python ips.py sim            # a fake 2-camera Pi, so you can see it work with no hardware
+python ips.py sim            # a fake Pi with 1 camera, so you can see it work with no hardware
 python ips.py status         # fps, latency, gestures
 ```
 Watch the page: a red dot follows the fake fingertip, pinches click, and a swipe moves Snake. `python ips.py open status` shows the same numbers live.
@@ -44,11 +44,30 @@ python ips.py stop           # stops the simulator and the hub; the recording is
 | `python ips.py test` | unit tests |
 | `python ips.py logs` | last lines of the hub log |
 
+## Everything on the Pi (no laptop)
+
+```bash
+./setup.sh --pi                       # once
+python3 ips.py pi-start               # hub + camera agent (1 CSI camera) + fullscreen Chromium on the projector
+python3 ips.py status                 # from the Pi, or from a laptop: IPS_URL=http://<pi-ip>:8080 python3 ips.py status
+python3 ips.py stop
+```
+Options: `--source camera` for a USB webcam, `--cams 0 1` for two cameras, `--os-pointer` to drive real windows, `--no-kiosk` to skip the browser.
+`python3 ips.py install-autostart` makes `pi-start` run at desktop login (`--remove` undoes it).
+
+What to check first on the real Pi (none of this has run on hardware yet):
+1. `python3 ips.py logs` and `data/logs/agent.log` after `pi-start`: the agent should print "connected to hub" and `status` should show about 20-30 fps.
+2. Colors: picamera2's "RGB888" frames are in B,G,R order; the agent now converts them for MediaPipe. If detection is poor, record a frame (`record.frames: true`) and check that skin looks normal.
+3. CPU and heat: tracking, the browser and the hub share 4 cores. Watch `vcgencmd measure_temp`; use a heatsink/fan.
+4. `--os-pointer` on the default Wayland desktop uses `ydotool` (installed by setup); it needs the `ydotoold` service running. Alternatively switch to X11 in `raspi-config`.
+5. If `import picamera2, mediapipe` fails with a numpy error: `.venv/bin/pip install "numpy<2"`.
+6. Camera video fills disk fast (about 2 MB/s per camera); prefer an SSD over the SD card if you record video.
+
 ## Real Pi (when hardware is ready)
 
 On the Pi: `python3 -m pip install opencv-python mediapipe` (and `picamera2` for the CSI cameras), then
 ```bash
-python3 edge/agent.py --hub <laptop-ip>:8080 --source picamera --cams 0 1 --os-pointer
+python3 edge/agent.py --hub <laptop-ip>:8080 --source picamera --cams 0 --os-pointer
 ```
 Use `--source camera` for USB webcams. `--send-frames` also uploads video (the hub only stores it if `record.frames` is `true` in `config.json`). On the Pi, open `http://<laptop-ip>:8080/ui/display.html` fullscreen in Chromium (kiosk mode) on the projector output. The Pi code paths are written but have **not been run on real hardware yet**.
 

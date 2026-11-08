@@ -1,7 +1,7 @@
 # Backend Design: Interactive Projection System (prototype)
 
 Status: v0.3, prototype implemented (see [SPEC.md](SPEC.md) for what is done and tested). Owner: Jeongbin (backend).
-Differences from the first drafts: JSON over WebSocket instead of Protobuf, `config.json` instead of YAML, SQLite + blob store for data, both cameras fused, Pi 5 (8 GB) confirmed so hub-side tracking is optional.
+Differences from the first drafts: JSON over WebSocket instead of Protobuf, `config.json` instead of YAML, SQLite + blob store for data, one camera by default (multi-camera fusion supported), Pi 5 (8 GB) confirmed and able to run everything so hub-side tracking is optional.
 Companion docs: [SPEC.md](SPEC.md) · [INTERFACES.md](INTERFACES.md) · [PROTOCOL.md](PROTOCOL.md) · [RUNBOOK.md](RUNBOOK.md)
 
 ---
@@ -108,9 +108,9 @@ camera frames --> IBlobStore (file:./data/blobs; other stores possible later) --
 - Video is stored as concatenated JPEGs per camera (MJPEG), which ffmpeg and OpenCV read directly; it avoids a video encoder on the hub.
 - Camera frames are off by default (`record.frames`); hand landmarks are on.
 
-## 5d. Two cameras
+## 5d. Cameras (one by default)
 
-Both cameras are used. Each has its own homography to projector pixels (calibration), so each camera yields a fingertip position in the same space. The hub averages them weighted by detection confidence, only among cameras that agree on the hand pose (an unsynchronized camera still showing the old pose is otherwise a source of fake jumps; this was found and fixed in testing). A camera that stops sending for 150 ms is ignored. One camera alone also works. This improves accuracy and tolerates one view being blocked; it is **not** 3D stereo.
+The team uses one camera (simpler); the hub works the same with one. When more cameras are used, each has its own homography to projector pixels (calibration), so each camera yields a fingertip position in the same space. The hub averages them weighted by detection confidence, only among cameras that agree on the hand pose (an unsynchronized camera still showing the old pose is otherwise a source of fake jumps; this was found and fixed in testing). A camera that stops sending for 150 ms is ignored. One camera alone also works. This improves accuracy and tolerates one view being blocked; it is **not** 3D stereo.
 
 ## 6. C++ and Python together
 
