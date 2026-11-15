@@ -28,7 +28,17 @@ One message per camera per frame (about 30/s per camera):
 - `ts` capture time, **wall-clock microseconds** (so end-to-end latency can be measured; needs NTP-synced clocks between Pi and hub).
 - `track_ms` time the Pi spent on tracking (feeds the Pi-vs-other benchmark).
 - `pts` MediaPipe order, normalized image coordinates. An empty `hands` list means "no hand seen".
-- If a hand frame has several hands, the hub uses the one with the highest `score`.
+- If a hand frame has several hands, the hub's own recognizer uses the one with the highest `score`.
+- Optional `"motion"` field: the result of Johnny's motion engine for this frame, computed by the agent from the same
+  landmarks (the agent can switch it off with `--no-motion`):
+  ```json
+  "motion":{"detected_hands":1,
+            "hands":[{"id":1,"handedness":"Right","detected":true,"predicted":false,"tip":[0.51,0.62],"raw_tip":[0.5,0.6],
+                      "center":[0.5,0.7],"velocity":[0.0,0.0],"pinching":false,"last_seen_ms_ago":0.0}],
+            "events":[{"type":"PINCH_START","hand_id":1}]}
+  ```
+  Event types: `HAND_FOUND`, `PINCH_START`, `PINCH_END` (with `hand_id`), `SWIPE_LEFT|RIGHT|UP|DOWN`, `ZOOM_IN`, `ZOOM_OUT`.
+  Coordinates are normalized like the landmarks. Hubs and recordings that do not know the field ignore it.
 
 Optional JPEG frame (binary WebSocket message): `[1 byte camera index][JPEG bytes]`. The hub stores these only when `record.frames` is true in `config.json`.
 
@@ -38,13 +48,13 @@ Optional JPEG frame (binary WebSocket message): `[1 byte camera index][JPEG byte
 
 ```json
 {"t":"content","url":"/apps/snake.html","app":"snake"}          switch the app shown in the page
-{"t":"action","kind":"move|down|up|swipe|home|hide","x":960,"y":540,"detail":"left"}
+{"t":"action","kind":"move|down|up|swipe|zoom|home|hide","x":960,"y":540,"detail":"left"}
 {"t":"calib","step":0,"total":4,"x":192,"y":108}                 show a calibration marker
 {"t":"calib","done":true,"cameras_calibrated":2}
 {"t":"brightness","value":0.6}
 {"t":"hb"}                                                        heartbeat, every second
 ```
-`x`,`y` are projector pixels in the display page's own coordinate system (the page reports its size with `POST /api/display_size`). `detail` is the swipe direction.
+`x`,`y` are projector pixels in the display page's own coordinate system (the page reports its size with `POST /api/display_size`). `detail` is the swipe direction (`left|right|up|down`) or the zoom direction (`in|out`); the page passes them to the app as the `ips-swipe` / `ips-zoom` events.
 
 The same `action` messages go to the agent when it said `os_pointer:true`, so a real browser or any window on the Pi can be driven with OS mouse events.
 
@@ -52,7 +62,7 @@ The same `action` messages go to the agent when it said `os_pointer:true`, so a 
 
 | Call | Meaning |
 |---|---|
-| `GET /api/status` | live numbers: fps, latency, drops, gestures, cameras, storage base |
+| `GET /api/status` | live numbers: fps, latency, drops, gestures acted on, `gesture_source`, `compare` (what each engine detected), `motion_frames`, cameras, storage base |
 | `GET /api/apps` | configured apps |
 | `POST /api/launch {"app":"snake"}` | switch app (id, `launcher`, or a URL) |
 | `POST /api/home` | back to launcher |

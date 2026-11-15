@@ -6,6 +6,15 @@ Related: [DESIGN.md](DESIGN.md) (rationale) · [INTERFACES.md](INTERFACES.md) (C
 **MUST** = required for the prototype, **SHOULD** = target, **MAY** = optional.
 The **Status** column says what exists in the repo today: Done (built and tested), Partial, Untested (written, no hardware to test), Not yet.
 
+## Changes in 1.4
+
+- **Johnny's hand tracker is integrated** (kept byte-for-byte unchanged in `edge/pi_hand_tracking_v2/`, guarded by a fingerprint test).
+  The agent loads his motion engine and his latest-frame camera class through `edge/motion_bridge.py`. (F-35, F-36)
+- **Two engines, one switch:** `gesture_source` = `hub` or `edge`; both always run and are compared in `/api/status`. (F-37)
+- **Two-hand zoom** reaches the display page as a `zoom` action. (F-38)
+- **Many more tests:** 101 C++ checks, 103 Python tests, Johnny's 13, and 5 end-to-end scenarios (`python ips.py test --e2e`).
+- Bugs found and fixed by the new tests: the agent crashed on non-English OS error messages; a corrupt video file could loop forever.
+
 ## Changes in 1.3
 
 - **One camera by default** (team decision: simpler). Multi-camera fusion stays available (`--cams 0 1`).
@@ -105,6 +114,10 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 | F-30 | Switching storage = change `blob_uri`; `ips.py migrate-uri OLD NEW` rewrites `uri` from `key`. | MUST | Done (rewrite only; copying the files is manual/`aws s3 sync`) |
 | F-31 | ML access: iterate over `assets` (filter by `kind`, session, date), resolve `uri`, read the blob. | MUST | Done (`tools/iter_assets.py`) |
 | F-34 | `ips.py pi-start` runs hub, camera agent and fullscreen display together on the Pi; `stop` ends all; `install-autostart` starts it at login. | SHOULD | Orchestration tested on Windows with synthetic hands; Pi path Untested |
+| F-35 | Johnny's `pi_hand_tracking_v2` lives in the repo unmodified; integration code is separate. | MUST | Done (fingerprint test) |
+| F-36 | The agent runs his MotionEngine on every frame of every source (camera, video, synthetic, replay) and attaches the result as `motion`. His LatestFrameCamera supplies camera frames. | MUST | Done in simulation; camera path Untested on the Pi |
+| F-37 | `gesture_source` (`hub`/`edge`) chooses which engine acts; the other is compared (`compare`). Fallback to our rules when no motion data arrives. | MUST | Done |
+| F-38 | Zoom in/out from two hands is delivered to apps (`ips-zoom`). | SHOULD | Done in simulation; needs `--max-hands 2` on the Pi |
 | F-33 | `setup.ps1` / `setup.sh` install dependencies, build, and test from a fresh clone; documented in the README. | MUST | See section 8 |
 | F-32 | CLI `ips.py`: start, stop, status, sim, open, launch, home, calibrate, apps, sessions, assets, bench, migrate-uri, logs. | MUST | Done |
 
@@ -172,6 +185,20 @@ Endpoints: `ws://hub:8080/edge`, `ws://hub:8080/display`, `GET /status`, `GET /a
 | Color order | on this photo, swapped colors still found the hand (0.97), so the effect on detection is smaller than first thought; recordings would still have had swapped colors, so the fix stays |
 
 **Not verified:** anything on the real Pi (picamera2 capture, MediaPipe speed on the Pi, OS pointer injection incl. ydotool, Chromium kiosk, autostart, setup.sh), real latency, calibration accuracy, projector effects, Linux build, long soak tests.
+
+**Added 2026-11-14 (Johnny's engine integrated):**
+
+| Check | Result |
+|---|---|
+| C++ tests | 101 checks, 0 failed (includes the edge adapter and the hub in both modes, calibration driven by his pinches) |
+| Python tests | 103 tests, 0 failed with OpenCV + MediaPipe (32 skipped without them); Johnny's own 13 pass |
+| End-to-end (`ips.py test --e2e`) | 5 scenarios pass: hub mode (2 clicks, 1 swipe, 1 home acted on; his zoom compared), edge mode (his clicks, swipe and zoom acted on, home from our rules), fallback without motion data, replay reproduces identical results from both engines, recordings catalogued |
+| Real MediaPipe model on a real hand photo | hand found, 21 points; our conversion of MediaPipe's output equals Johnny's `observations()`; engine tracks it |
+| Tests can fail | 3 deliberate breakages (his pinch threshold; edge mode never acting; wrong hand clicking) were each caught, then reverted |
+| Bugs found by the tests | agent crashed printing a localized OS error; a corrupt video made the video source loop forever (both fixed, with regression tests) |
+| Observed on the real Pi earlier | 22-28 frames/s and 35-43 ms tracking per frame with one hand (our agent, before this change) |
+
+**Still not verified:** the integrated path with real hands on the Pi (Johnny reports his standalone app catches real pinches and two hands), real-hand comparison of the two engines, and CPU cost of `--max-hands 2` together with the browser and hub.
 
 ## 9. Open items
 

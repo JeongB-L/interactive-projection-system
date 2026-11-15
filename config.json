@@ -13,6 +13,9 @@
   "blob_uri": "file:./data/blobs",
   // Where the camera-to-projector calibration is saved.
   "calib_path": "data/calibration.json",
+  // Who decides gestures: "hub" = our C++ rules (default); "edge" = Johnny's motion engine running on the Pi
+  // (adds two-hand zoom; our rules still provide the "home" gesture). The status page compares both either way.
+  "gesture_source": "hub",
   // What to record. Hand landmarks are small; camera video (frames) is large and private, so it is OFF by default.
   "record": { "landmarks": true, "frames": false },
   // Gesture detection tuning (used by the default rule-based recognizer):

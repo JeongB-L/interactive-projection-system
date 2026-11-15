@@ -1,3 +1,5 @@
 * text=auto
 *.sh text eol=lf
 *.ps1 text eol=crlf
+# Johnny's files are stored and checked out byte for byte (no line-ending changes), so their fingerprints stay valid on every OS.
+edge/pi_hand_tracking_v2/** -text

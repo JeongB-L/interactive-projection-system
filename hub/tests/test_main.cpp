@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <filesystem>
 
+#include "hub.hpp"
+#include <thread>
 #include "gesture.hpp"
 #include "storage.hpp"
 
@@ -261,6 +263,335 @@ TEST(storage_catalog_points_at_blobs) {
 }
 
 // Runs every registered test, prints ok/FAIL per test and a summary, and returns non-zero on failure.
+// ============================================================================================
+// Johnny's motion engine -> gestures (EdgeAdapter), and the hub's "hub" / "edge" gesture_source modes
+// ============================================================================================
+
+// A hand as Johnny's engine reports it (normalized fingertip), and a whole motion result with events.
+static json m_hand(int id, double x, double y, bool detected = true) {
+	return {{"id", id}, {"handedness", "Right"}, {"detected", detected}, {"predicted", !detected},
+					{"tip", {x, y}}, {"center", {x, y}}, {"pinching", false}};
+}
+static json m_event(const char *type, int hand = 1) { return {{"type", type}, {"hand_id", hand}}; }
+static json motion_of(std::vector<json> hands, std::vector<json> events = {}) {
+	json m = {{"hands", json::array()}, {"detected_hands", 0}, {"events", json::array()}};
+	int detected = 0;
+	for (auto &h : hands) {
+		m["hands"].push_back(h);
+		if (h["detected"].get<bool>()) ++detected;
+	}
+	for (auto &e : events) m["events"].push_back(e);
+	m["detected_hands"] = detected;
+	return m;
+}
+static std::string kinds(const std::vector<Gesture> &g) {
+	std::string s;
+	for (auto &x : g) s += (s.empty() ? "" : ",") + x.kind;
+	return s;
+}
+
+TEST(edge_cursor_maps_the_fingertip_to_pixels) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	auto g = a.update(motion_of({m_hand(1, 0.25, 0.5)}), m, 0, 1000);
+	CHECK(g.size() == 1 && g[0].kind == "move");
+	CHECK(std::fabs(g[0].x - 250) < 1e-6 && std::fabs(g[0].y - 250) < 1e-6);
+}
+
+TEST(edge_dead_zone_hides_tiny_movements) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.500, 0.5)}), m, 0, 1000);
+	CHECK(a.update(motion_of({m_hand(1, 0.502, 0.5)}), m, 0, 2000).empty());  // 2 px: ignored
+	CHECK(kinds(a.update(motion_of({m_hand(1, 0.540, 0.5)}), m, 0, 3000)) == "move");  // 38 px: reported
+}
+
+TEST(edge_pinch_gives_one_down_then_one_up) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.5, 0.5)}), m, 0, 1000);
+	CHECK(kinds(a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")}), m, 0, 2000)) == "down");
+	CHECK(a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")}), m, 0, 3000).empty());  // repeat ignored
+	CHECK(kinds(a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_END")}), m, 0, 4000)) == "up");
+	CHECK(a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_END")}), m, 0, 5000).empty());  // stray end ignored
+}
+
+TEST(edge_move_is_reported_before_the_click_in_the_same_frame) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	auto g = a.update(motion_of({m_hand(1, 0.3, 0.5)}, {m_event("PINCH_START")}), m, 0, 1000);
+	CHECK(kinds(g) == "move,down");
+	CHECK(std::fabs(g[1].x - 300) < 1e-6);  // the click happens where the cursor is
+}
+
+TEST(edge_only_the_controlling_hand_can_click) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	json two = {m_hand(1, 0.2, 0.5), m_hand(2, 0.8, 0.5)};
+	auto g = a.update(motion_of({two[0], two[1]}, {m_event("PINCH_START", 2)}), m, 0, 1000);
+	CHECK(kinds(g) == "move");  // the second hand pinching does not click
+}
+
+TEST(edge_cursor_follows_the_lowest_id_hand) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	auto g = a.update(motion_of({m_hand(2, 0.8, 0.5), m_hand(1, 0.2, 0.5)}), m, 0, 1000);
+	CHECK(g.size() == 1 && std::fabs(g[0].x - 200) < 1e-6);
+}
+
+TEST(edge_lost_hand_releases_the_pinch_and_hides_once) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")}), m, 0, 1000);
+	CHECK(kinds(a.update(motion_of({}), m, 0, 2000)) == "up,hide");
+	CHECK(a.update(motion_of({}), m, 0, 3000).empty());  // nothing more once hidden
+}
+
+TEST(edge_a_merely_predicted_hand_counts_as_no_hand) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.5, 0.5)}), m, 0, 1000);
+	CHECK(kinds(a.update(motion_of({m_hand(1, 0.5, 0.5, false)}), m, 0, 2000)) == "hide");
+}
+
+TEST(edge_changing_the_controlling_hand_releases_the_old_pinch) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.3, 0.5)}, {m_event("PINCH_START")}), m, 0, 1000);
+	auto g = a.update(motion_of({m_hand(2, 0.7, 0.5)}), m, 0, 2000);  // hand 1 left, hand 2 took over
+	CHECK(kinds(g) == "up,move");
+}
+
+TEST(edge_swipes_map_to_four_directions) {
+	Mapper m(1000, 500);
+	const char *types[4] = {"SWIPE_LEFT", "SWIPE_RIGHT", "SWIPE_UP", "SWIPE_DOWN"};
+	const char *dirs[4] = {"left", "right", "up", "down"};
+	for (int i = 0; i < 4; ++i) {
+		EdgeAdapter a(6);
+		auto g = a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event(types[i])}), m, 0, 1000);
+		CHECK(g.size() == 2 && g[1].kind == "swipe" && g[1].dir == dirs[i]);
+	}
+}
+
+TEST(edge_zoom_maps_to_in_and_out) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	auto g = a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("ZOOM_IN")}), m, 0, 1000);
+	CHECK(g.size() == 2 && g[1].kind == "zoom" && g[1].dir == "in");
+	g = a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("ZOOM_OUT")}), m, 0, 2000);
+	CHECK(g.size() == 1 && g[0].kind == "zoom" && g[0].dir == "out");
+}
+
+TEST(edge_cursor_uses_the_calibration) {
+	Mapper m(1000, 500);
+	Homography h;
+	h.h = {2, 0, 0, 0, 2, 0, 0, 0, 1};  // a made-up calibration that doubles every coordinate
+	m.set(0, h);
+	EdgeAdapter a(0);
+	auto g = a.update(motion_of({m_hand(1, 0.25, 0.25)}), m, 0, 1000);
+	CHECK(g.size() == 1 && std::fabs(g[0].x - 0.5) < 1e-9 && std::fabs(g[0].y - 0.5) < 1e-9);
+	auto other = a.update(motion_of({m_hand(1, 0.25, 0.25)}), m, 1, 2000);  // camera 1 is uncalibrated: plain scaling
+	CHECK(other.size() == 1 && std::fabs(other[0].x - 250) < 1e-6);
+}
+
+TEST(edge_garbage_input_never_throws) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	CHECK(a.update(json("garbage"), m, 0, 1000).empty());
+	CHECK(a.update(json::object(), m, 0, 2000).empty());
+	CHECK(a.update(json{{"hands", "oops"}}, m, 0, 3000).empty());
+	json bad_tip = {{"hands", json::array({{{"id", 1}, {"detected", true}, {"tip", {"a", "b"}}}})}};
+	CHECK(a.update(bad_tip, m, 0, 4000).empty());  // wrong types: the whole frame is ignored
+	json no_tip = {{"hands", json::array({{{"id", 1}, {"detected", true}}})}};
+	CHECK(kinds(a.update(no_tip, m, 0, 5000)) == "move");  // missing tip: treated as the screen centre, no crash
+}
+
+TEST(edge_reset_forgets_everything) {
+	Mapper m(1000, 500);
+	EdgeAdapter a(6);
+	a.update(motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")}), m, 0, 1000);
+	a.reset();
+	CHECK(a.update(motion_of({}), m, 0, 2000).empty());  // no phantom "up" or "hide" after a reset
+}
+
+// ---- the whole hub, in both modes ----------------------------------------------------------------
+
+// A real Hub in a temporary folder whose display output is captured (no network involved).
+struct HubFixture {
+	std::filesystem::path dir;
+	std::unique_ptr<Hub> hub;
+	std::vector<json> all, actions;
+	explicit HubFixture(const std::string &source) {
+		static int counter = 0;
+		dir = std::filesystem::temp_directory_path() / ("ips_hub_test_" + std::to_string(++counter));
+		std::error_code ec;
+		std::filesystem::remove_all(dir, ec);
+		Config c;
+		c.db_path = (dir / "t.db").generic_string();
+		c.blob_uri = "file:" + (dir / "blobs").generic_string();
+		c.calib_path = (dir / "calib.json").generic_string();
+		c.gesture_source = source;
+		c.screen_w = 1000;
+		c.screen_h = 500;
+		hub = std::make_unique<Hub>(c);
+		hub->add_display([this](const std::string &s) {
+			json j = json::parse(s);
+			all.push_back(j);
+			if (j.value("t", "") == "action") actions.push_back(j);
+			return true;
+		});
+	}
+	~HubFixture() {
+		hub.reset();
+		std::error_code ec;
+		std::filesystem::remove_all(dir, ec);
+	}
+	int count(const std::string &kind) const {
+		int n = 0;
+		for (auto &a : actions) if (a.value("kind", "") == kind) ++n;
+		return n;
+	}
+	const json *first(const std::string &kind) const {
+		for (auto &a : actions) if (a.value("kind", "") == kind) return &a;
+		return nullptr;
+	}
+};
+
+static uint64_t g_seq = 0;
+static json hands_msg(int cam, const std::vector<Hand> &hs, json motion = nullptr) {
+	json j = {{"t", "hands"}, {"cam", cam}, {"seq", ++g_seq}, {"ts", wall_us()}, {"track_ms", 10.0}, {"hands", json::array()}};
+	for (auto &h : hs) {
+		json pts = json::array();
+		for (int i = 0; i < 21; ++i) pts.push_back({h.xyz[i * 3], h.xyz[i * 3 + 1], 0.0});
+		j["hands"].push_back({{"right", true}, {"score", h.score}, {"pts", pts}});
+	}
+	if (!motion.is_null()) j["motion"] = motion;
+	return j;
+}
+// Our own recognizer's view of a pinch: bring the thumb tip (landmark 4) onto the index tip (landmark 8).
+static Hand pinched(Hand h) {
+	for (int k = 0; k < 2; ++k) h.xyz[4 * 3 + k] = h.xyz[8 * 3 + k] + 0.004f;
+	return h;
+}
+
+TEST(hub_mode_acts_on_our_rules_and_only_counts_the_edge_events) {
+	HubFixture f("hub");
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.25, 0.5)}, {m_event("PINCH_START")})));
+	CHECK(f.count("down") == 0);                      // the edge engine's pinch did NOT click
+	const json *mv = f.first("move");
+	CHECK(mv && std::abs((*mv)["x"].get<int>() - 500) <= 1);  // the cursor is where OUR recognizer put it (0.5), not his (0.25)
+	json s = f.hub->status();
+	CHECK(s["gesture_source"] == "hub");
+	CHECK(s["compare"]["edge"]["down"] == 1);         // but it was counted for comparison
+	CHECK(!s["compare"]["hub"].contains("down"));
+}
+
+TEST(edge_mode_acts_on_johnnys_events) {
+	HubFixture f("edge");
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.25, 0.5)}, {m_event("PINCH_START")})));
+	CHECK(f.count("down") == 1);
+	const json *mv = f.first("move");
+	CHECK(mv && std::abs((*mv)["x"].get<int>() - 250) <= 1);  // the cursor follows HIS fingertip (0.25 of 1000 px)
+	json s = f.hub->status();
+	CHECK(s["gesture_source"] == "edge");
+	CHECK(s["gesture_counts"]["down"] == 1);
+	CHECK(s["compare"]["edge"]["down"] == 1);
+}
+
+TEST(both_engines_agree_on_an_obvious_pinch_and_only_one_clicks) {
+	HubFixture f("hub");
+	f.hub->on_hands(hands_msg(0, {pinched(pose_hand(false, 0.5, 0.5, .95f))}, motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")})));
+	json s = f.hub->status();
+	CHECK(s["compare"]["hub"]["down"] == 1 && s["compare"]["edge"]["down"] == 1);
+	CHECK(f.count("down") == 1);  // never a double click
+}
+
+TEST(edge_mode_falls_back_to_our_rules_when_no_motion_data_arrives) {
+	HubFixture f("edge");
+	f.hub->on_hands(hands_msg(0, {pinched(pose_hand(false, 0.5, 0.5, .95f))}));  // no "motion" key (agent started with --no-motion)
+	CHECK(f.count("down") == 1);
+	CHECK(f.hub->status()["motion_frames"] == 0);
+}
+
+TEST(edge_mode_follows_a_single_camera) {
+	HubFixture f("edge");
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)})));
+	f.hub->on_hands(hands_msg(1, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")})));
+	CHECK(f.count("down") == 0);  // camera 1's pinch is ignored: edge mode follows camera 0
+	CHECK(!f.hub->status()["compare"]["edge"].contains("down"));
+}
+
+TEST(swipes_and_zooms_reach_the_display) {
+	HubFixture f("edge");
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)}, {m_event("SWIPE_LEFT"), m_event("ZOOM_IN")})));
+	const json *sw = f.first("swipe");
+	const json *zm = f.first("zoom");
+	CHECK(sw && (*sw)["detail"] == "left");
+	CHECK(zm && (*zm)["detail"] == "in");
+}
+
+TEST(status_reports_how_many_frames_carried_motion_data) {
+	HubFixture f("hub");
+	for (int i = 0; i < 5; ++i) f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)})));
+	for (int i = 0; i < 3; ++i) f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}));
+	CHECK(f.hub->status()["motion_frames"] == 5);
+}
+
+TEST(a_malformed_motion_field_does_not_break_the_hub) {
+	HubFixture f("edge");
+	json msg = hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)});
+	msg["motion"] = "not an object";
+	f.hub->on_hands(msg);  // falls back to our rules, no crash
+	msg["motion"] = {{"hands", 5}, {"events", "x"}};
+	f.hub->on_hands(msg);
+	CHECK(f.hub->status()["bad_messages"] == 0);
+}
+
+TEST(edge_mode_still_provides_home_from_our_rules) {
+	HubFixture f("edge");
+	// An open palm held still for over a second: Johnny's engine has no such gesture, ours does.
+	Hand palm = pose_hand(true, 0.5, 0.5, .95f);
+	auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1250);
+	while (std::chrono::steady_clock::now() < end) {
+		f.hub->on_hands(hands_msg(0, {palm}, motion_of({m_hand(1, 0.5, 0.5)})));
+		std::this_thread::sleep_for(std::chrono::milliseconds(33));
+	}
+	CHECK(f.count("home") == 1);
+}
+
+TEST(calibration_works_with_pinches_from_the_edge_engine) {
+	HubFixture f("edge");
+	f.hub->calibrate_start();
+	const double xs[4] = {0.2, 0.8, 0.8, 0.2}, ys[4] = {0.2, 0.2, 0.8, 0.8};  // roughly where the four markers are
+	for (int i = 0; i < 4; ++i) {
+		Hand h = pose_hand(false, xs[i], ys[i], .95f);
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_START")})));
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_END")})));
+	}
+	CHECK(f.count("down") == 0);  // the pinches were consumed by calibration, not delivered as clicks
+	bool done = false;
+	for (auto &j : f.all) if (j.value("t", "") == "calib" && j.value("done", false)) done = j["cameras_calibrated"] == 1;
+	CHECK(done);
+	CHECK(f.hub->status()["cameras"]["0"]["calibrated"] == true);
+}
+
+TEST(gesture_source_setting_is_read_from_the_config_file) {
+	namespace fs = std::filesystem;
+	fs::path dir = fs::temp_directory_path() / "ips_cfg_test";
+	std::error_code ec;
+	fs::remove_all(dir, ec);
+	fs::create_directories(dir);
+	auto load = [&](const std::string &text) {
+		std::ofstream(dir / "c.json") << text;
+		return Config::load((dir / "c.json").generic_string()).gesture_source;
+	};
+	CHECK(load("{}") == "hub");                                        // default
+	CHECK(load("{\"gesture_source\": \"edge\"}") == "edge");
+	CHECK(load("{\"gesture_source\": \"hub\"}") == "hub");
+	CHECK(load("{\"gesture_source\": \"bogus\"}") == "hub");           // invalid value: safe default
+	CHECK(load("// a comment\n{\"gesture_source\": \"edge\" /* inline */}") == "edge");  // comments are allowed
+	fs::remove_all(dir, ec);
+}
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   for (auto& t : tests()) {

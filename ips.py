@@ -27,7 +27,7 @@
   python ips.py assets           list stored files (video, logs) from the database
   python ips.py migrate-uri URI  point every stored file at a new storage location (cloud switch)
   python ips.py bench            run the simulator for N seconds and print a latency table
-  python ips.py test             run the unit tests
+  python ips.py test             run all unit tests (add --e2e for the end-to-end test too)
   python ips.py logs             tail the hub log
 """
 import argparse
@@ -234,7 +234,11 @@ def cmd_status(a):
           % (s["fps_total"], s["hub_ms"]["p50"], s["hub_ms"]["p95"], s["e2e_ms"]["p50"], s["e2e_ms"]["p95"],
              s["track_ms_avg"], s["dropped"]))
     print("cameras:", {c: ("%d frames, calibrated=%s" % (v["frames"], v["calibrated"])) for c, v in s["cameras"].items()})
-    print("gestures:", s["gesture_counts"])
+    print("gestures acted on:", s["gesture_counts"], "(engine in charge: %s)" % s.get("gesture_source", "hub"))
+    if s.get("motion_frames"):
+        print("engine comparison (detected, excluding cursor moves):")
+        print("   our hub rules  :", s["compare"]["hub"])
+        print("   Johnny's engine:", s["compare"]["edge"], " (%d frames carried his data)" % s["motion_frames"])
     print("storage:", s["blob_base"])
 
 
@@ -267,6 +271,7 @@ def cmd_pi_start(a):
             cmd.append("--os-pointer")
         if a.video:
             cmd += ["--video", os.path.abspath(a.video)]
+        cmd += ["--max-hands", str(a.max_hands)]
         pid = spawn(cmd, AGENT_LOG, AGENT_PID)
         print("camera agent started (pid %d): source %s, camera(s) %s  (log: %s)" % (pid, a.source, a.cams, AGENT_LOG))
     # 3. The projected page in a fullscreen browser on this machine's display (the projector).
@@ -414,7 +419,20 @@ def cmd_test(a):
     exe = os.path.join(BUILD, "ips_tests.exe" if os.name == "nt" else "ips_tests")
     if not os.path.exists(exe):
         cmd_build(a)
-    sys.exit(subprocess.run([exe], env=tool_env()).returncode)
+    py = AGENT_PY  # the Pi's .venv when present (so tests that need MediaPipe / OpenCV can run), else this Python
+    suites = [("C++ hub tests", [exe]),
+              ("Python agent + motion tests", [py, "-m", "unittest", "discover", "-s", os.path.join(ROOT, "edge", "tests")]),
+              ("Johnny's own tracker tests", [py, "-m", "unittest", "discover", "-s",
+                                              os.path.join(ROOT, "edge", "pi_hand_tracking_v2", "tests")])]
+    if a.e2e:
+        suites.append(("End-to-end (real hub + agent)", [py, os.path.join(ROOT, "tests", "e2e.py")]))
+    failed = []
+    for name, cmd in suites:
+        print("\n===== %s =====" % name, flush=True)
+        if subprocess.run(cmd, env=tool_env(), cwd=ROOT).returncode:
+            failed.append(name)
+    print("\n" + ("ALL TEST SUITES PASSED (%d)" % len(suites) if not failed else "FAILED: " + ", ".join(failed)))
+    sys.exit(1 if failed else 0)
 
 
 # `logs`: print the last lines of the hub's log file.
@@ -446,7 +464,8 @@ def main():
     pi_args = (("--source", dict(default="picamera", choices=["picamera", "camera", "synthetic", "video"])),
                ("--video", dict(default="", help="video or photo file for --source video")),
                ("--cams", dict(type=int, nargs="+", default=[0])),
-               ("--os-pointer", dict(action="store_true")))
+               ("--os-pointer", dict(action="store_true")),
+               ("--max-hands", dict(type=int, choices=[1, 2], default=1, help="hands to track (2 enables two-hand zoom, uses more CPU)")))
     add("pi-start", cmd_pi_start, *pi_args, ("--no-kiosk", dict(action="store_true")))
     add("install-autostart", cmd_autostart, *pi_args, ("--remove", dict(action="store_true")))
     add("open", cmd_open, ("page", dict(nargs="?", default="display", choices=["display", "status"])))
@@ -460,7 +479,7 @@ def main():
     add("migrate-uri", cmd_migrate, ("new_base", dict()), ("--dry-run", dict(action="store_true")))
     add("bench", cmd_bench, ("--seconds", dict(type=int, default=15)), ("--cams", dict(type=int, default=1)),
         ("--fps", dict(type=float, default=30)))
-    add("test", cmd_test)
+    add("test", cmd_test, ("--e2e", dict(action="store_true", help="also run the end-to-end test (starts a real hub on port 8099)")))
     add("logs", cmd_logs, ("-n", dict(type=int, default=30)))
     a = ap.parse_args()
     a.fn(a)

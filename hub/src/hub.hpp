@@ -45,6 +45,7 @@ namespace ips
 		int screen_w = 1920, screen_h = 1080;				 // projector size until the display page reports its own
 		bool record_landmarks = true, record_frames = false; // camera frames are OFF by default (privacy, size)
 		GestureConfig gesture;
+		std::string gesture_source = "hub"; // who decides gestures: "hub" (our C++ rules) or "edge" (Johnny's engine, run on the Pi)
 		std::vector<AppDef> apps;
 		std::string launcher_url = "/apps/launcher.html";
 		static Config load(const std::string &path); // read config.json
@@ -97,6 +98,8 @@ namespace ips
 		Mapper mapper_;								// camera -> projector mapping
 		Fuser fuser_;								// merges the cameras
 		RuleRecognizer rec_;						// the (default example) gesture detector
+		EdgeAdapter edge_adapter_; // converts Johnny's motion-engine output (from the Pi) into gestures
+		int edge_cam_ = -1;        // the one camera whose motion data edge mode follows (the first to send it)
 		std::unique_ptr<IBlobStore> blobs_;			// where files are written
 		std::unique_ptr<Catalog> catalog_;			// SQLite index of those files
 		std::unique_ptr<SessionRecorder> recorder_; // active only while a Pi is connected
@@ -123,6 +126,8 @@ namespace ips
 		uint64_t dropped_ = 0, bad_ = 0, actions_ = 0;
 		std::map<std::string, uint64_t> gesture_counts_;
 		std::deque<json> last_gestures_;
+		uint64_t motion_frames_ = 0;                                  // hands messages that carried Johnny's motion data
+		std::map<std::string, uint64_t> compare_hub_, compare_edge_;  // what each engine detected (excluding cursor moves)
 		uint64_t jpeg_frames_ = 0;
 	};
 

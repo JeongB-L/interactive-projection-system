@@ -78,6 +78,14 @@ function onAction(a) {
   if (a.kind === 'hide') { cursor.style.display = 'none'; return; }
   if (a.kind === 'home') { toast('Home'); return; }
   // A swipe is delivered to the app as a custom 'ips-swipe' event carrying the direction.
+  // A zoom (two hands moving apart or together) is delivered to the app as a custom 'ips-zoom' event ('in' or 'out').
+  if (a.kind === 'zoom') {
+    toast('Zoom ' + a.detail);
+    try {
+      frame.contentWindow.dispatchEvent(new frame.contentWindow.CustomEvent('ips-zoom', { detail: { dir: a.detail } }));
+    } catch (e) { /* external page: cannot be driven from here */ }
+    return;
+  }
   if (a.kind === 'swipe') {
     toast('Swipe ' + a.detail);
     try {

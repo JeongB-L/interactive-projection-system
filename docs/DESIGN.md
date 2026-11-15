@@ -112,6 +112,15 @@ camera frames --> IBlobStore (file:./data/blobs; other stores possible later) --
 
 The team uses one camera (simpler); the hub works the same with one. When more cameras are used, each has its own homography to projector pixels (calibration), so each camera yields a fingertip position in the same space. The hub averages them weighted by detection confidence, only among cameras that agree on the hand pose (an unsynchronized camera still showing the old pose is otherwise a source of fake jumps; this was found and fixed in testing). A camera that stops sending for 150 ms is ignored. One camera alone also works. This improves accuracy and tolerates one view being blocked; it is **not** 3D stereo.
 
+## 5e. Two gesture engines
+
+The hub has two interchangeable ways to turn hand data into gestures, and both always run:
+- **Hub rules** (`RuleRecognizer`, C++): works on the fused landmarks; deterministic; provides "home".
+- **Johnny's motion engine** (`MotionEngine`, Python, runs in the agent on the Pi): hand IDs, two hands, smoothing, brief prediction, pinch/swipe/zoom. Its result rides along in each `hands` message, and `EdgeAdapter` (C++) converts it into the same `Gesture` stream.
+
+`gesture_source` picks the one that acts. Keeping both running means the choice can be made from comparison data, and recordings keep both
+engines' inputs so a session replays to identical results. Johnny's code is vendored unchanged; only `edge/motion_bridge.py` touches it.
+
 ## 6. C++ and Python together
 
 Where each language goes, and how they connect:

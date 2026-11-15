@@ -164,4 +164,24 @@ namespace ips
 		int64_t still_since_ = 0, last_swipe_ = -1'000'000'000;
 	};
 
+// Turns Johnny's motion-engine output into the same Gesture stream our own RuleRecognizer produces, so the
+// rest of the hub does not care which engine made the gestures. The Pi agent runs his engine on every frame and
+// attaches its result to the "hands" message under the key "motion":
+//   {"hands":[{"id","detected","tip":[x,y],...}], "detected_hands":n,
+//    "events":[{"type":"PINCH_START|PINCH_END|SWIPE_LEFT|SWIPE_RIGHT|SWIPE_UP|SWIPE_DOWN|ZOOM_IN|ZOOM_OUT","hand_id":..}]}
+// What it produces: move (cursor follows the controlling hand's smoothed fingertip), down / up (pinch), swipe
+// (left|right|up|down), zoom (in|out) and hide (no hand). The controlling hand is the detected hand with the lowest id.
+class EdgeAdapter
+{
+public:
+	explicit EdgeAdapter(double dead_zone_px = 6) : dz_(dead_zone_px) {}
+	std::vector<Gesture> update(const json &motion, const Mapper &m, int cam, int64_t t_us);
+	void reset(); // forget the current hand and any active pinch
+
+private:
+	double dz_;                           // ignore cursor movement smaller than this many pixels
+	bool present_ = false, pinched_ = false;
+	int primary_ = -1;                    // id of the controlling hand (-1 = none)
+	Vec2 cursor_{}, last_emit_{-1e9, -1e9};
+};
 } // namespace ips

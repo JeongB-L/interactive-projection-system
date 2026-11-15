@@ -63,6 +63,30 @@ What to check first on the real Pi (none of this has run on hardware yet):
 5. If `import picamera2, mediapipe` fails with a numpy error: `.venv/bin/pip install "numpy<2"`.
 6. Camera video fills disk fast (about 2 MB/s per camera); prefer an SSD over the SD card if you record video.
 
+## Choosing the gesture engine
+
+`config.json` has `"gesture_source": "hub"` (our C++ rules, the default) or `"edge"` (Johnny's motion engine running on the Pi).
+Edit it, then `python3 ips.py stop` and `start`. Both engines always run; `python3 ips.py status` shows what each one detected:
+```
+gestures acted on: {...} (engine in charge: hub)
+engine comparison (detected, excluding cursor moves):
+   our hub rules  : {'down': 2, 'up': 2, 'swipe': 1, 'home': 1}
+   Johnny's engine: {'down': 2, 'up': 2, 'swipe': 2, 'zoom': 1}  (390 frames carried his data)
+```
+Notes: `edge` mode follows one camera (the first that sends motion data) and still takes the "home" gesture from our rules.
+If the agent runs with `--no-motion`, the hub falls back to its own rules whatever the setting says.
+Two-hand zoom needs `--max-hands 2` (`python3 ips.py pi-start --max-hands 2`), which costs more CPU on the Pi.
+Agent options: `--max-hands {1,2}`, `--no-motion`, `--mirror`, `--exposure-us N --gain G` (shorter exposure for fast motion), `--two-hands` (fake zoom in the simulator).
+
+## Running the tests
+
+```bash
+python3 ips.py test          # C++ hub, Python agent + motion engine, Johnny's own tests
+python3 ips.py test --e2e    # plus the end-to-end test: real hub + real agent, both gesture modes, replay (about a minute)
+```
+On the Pi the real-model tests also run (they need `models/hand_landmarker.task` and `data/hands.jpg`; the sample photo command is below).
+Without OpenCV/MediaPipe those tests are skipped, not failed. Johnny's files must stay untouched: a test checks their fingerprints.
+
 ## Testing with nobody in front of the camera
 
 Three ways to exercise the system when no one can stand at the camera (all on the Pi, from a terminal on its desktop):

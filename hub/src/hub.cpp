@@ -49,6 +49,12 @@ namespace ips
 		// Gesture thresholds and the list of apps.
 		if (j.contains("gesture"))
 			c.gesture = GestureConfig::from_json(j["gesture"]);
+		// Which engine decides gestures: "hub" (our C++ rules, the default) or "edge" (Johnny's engine on the Pi).
+		std::string src = j.value("gesture_source", c.gesture_source);
+		if (src == "hub" || src == "edge")
+			c.gesture_source = src;
+		else
+			std::fprintf(stderr, "unknown gesture_source '%s', using 'hub'\n", src.c_str());
 		if (j.contains("apps"))
 			for (const auto &a : j["apps"])
 				c.apps.push_back({a.value("id", ""), a.value("name", ""), a.value("url", ""),
@@ -62,6 +68,8 @@ namespace ips
 	Hub::Hub(Config cfg)
 		: cfg_(cfg), mapper_(cfg.screen_w, cfg.screen_h), rec_(cfg.gesture, cfg.screen_w, cfg.screen_h)
 	{
+		// The edge adapter uses the same cursor dead zone as our own recognizer.
+		edge_adapter_ = EdgeAdapter(cfg_.gesture.dead_zone_px);
 		blobs_ = make_blob_store(cfg_.blob_uri);
 		catalog_ = std::make_unique<Catalog>(cfg_.db_path);
 		// Reuse the calibration saved on a previous run, if there is one.
@@ -126,6 +134,8 @@ namespace ips
 		// Start the pipeline from a clean slate so old state can't leak into the new session.
 		fuser_ = Fuser();
 		rec_.reset();
+		edge_adapter_.reset();
+		edge_cam_ = -1;
 		last_seq_.clear();
 		edge_(json{{"t", "hello_ack"}, {"session", recorder_->session_id()}, {"record_frames", cfg_.record_frames}}.dump());
 	}
@@ -198,8 +208,41 @@ namespace ips
 		fuser_.update(f, mapper_, t0);
 		Fused fu = fuser_.fuse(t0, stale);
 
-		// Step 4: recognize gestures and act on each one.
-		std::vector<Gesture> gs = rec_.update(fu, t0);
+		// Our own rule-based recognizer always runs (for comparison, and for the "home" gesture).
+		std::vector<Gesture> hub_gs = rec_.update(fu, t0);
+		// Johnny's motion engine ran on the Pi and attached its result to the message (if the agent has it switched on).
+		bool has_motion = msg.contains("motion") && msg["motion"].is_object();
+		std::vector<Gesture> edge_gs;
+		if (has_motion)
+		{
+			++motion_frames_;
+			if (edge_cam_ < 0)
+				edge_cam_ = f.camera; // edge mode follows ONE camera: the first one that sends motion data
+			if (f.camera == edge_cam_)
+				edge_gs = edge_adapter_.update(msg["motion"], mapper_, f.camera, t0);
+		}
+		// Count what each engine detected, so the two can be compared on the same live or replayed data.
+		for (const auto &g : hub_gs)
+			if (g.kind != "move")
+				++compare_hub_[g.kind];
+		for (const auto &g : edge_gs)
+			if (g.kind != "move")
+				++compare_edge_[g.kind];
+		// Decide which engine acts. "edge" mode uses Johnny's gestures plus our "home" (his engine has none).
+		// If the agent sends no motion data, fall back to our own recognizer so the system keeps working.
+		std::vector<Gesture> gs;
+		if (cfg_.gesture_source == "edge" && has_motion)
+		{
+			if (f.camera == edge_cam_)
+				gs = edge_gs;
+			for (const auto &g : hub_gs)
+				if (g.kind == "home")
+					gs.push_back(g);
+		}
+		else
+		{
+			gs = hub_gs;
+		}
 		for (const auto &g : gs)
 			handle_gesture(g, t0);
 
@@ -447,6 +490,9 @@ namespace ips
 				{"jpeg_frames", jpeg_frames_},
 				{"actions", actions_},
 				{"gesture_counts", gesture_counts_},
+				{"gesture_source", cfg_.gesture_source},
+				{"motion_frames", motion_frames_},
+				{"compare", {{"hub", compare_hub_}, {"edge", compare_edge_}}},
 				{"calibrating_step", calib_step_},
 				{"last_gestures", last_gestures_},
 				{"blob_base", blobs_->base_uri()}};

@@ -405,4 +405,100 @@ namespace ips
 		return out;
 	}
 
+// ---- edge adapter (Johnny's motion engine -> our gestures) -------------------
+
+// Forget the current hand and any active pinch (new session).
+void EdgeAdapter::reset()
+{
+	present_ = pinched_ = false;
+	primary_ = -1;
+	last_emit_ = {-1e9, -1e9};
+}
+
+// Convert one motion-engine result into gestures (see gesture.hpp for the input format).
+// Malformed input never throws: it is treated as "no hand".
+std::vector<Gesture> EdgeAdapter::update(const json &motion, const Mapper &m, int cam, int64_t t)
+{
+	std::vector<Gesture> out;
+	// Small helper that appends a gesture stamped with the current time.
+	auto emit = [&](const char *kind, Vec2 p, const std::string &dir = "")
+	{ out.push_back({kind, p.x, p.y, dir, t}); };
+	try
+	{
+		// Choose the controlling hand: the detected (not merely predicted) hand with the lowest id.
+		const json *primary = nullptr;
+		if (motion.is_object() && motion.contains("hands") && motion["hands"].is_array())
+			for (const auto &h : motion["hands"])
+				if (h.value("detected", false) && (!primary || h.value("id", 0) < primary->value("id", 0)))
+					primary = &h;
+
+		// No usable hand: never leave a click stuck down, and hide the cursor once.
+		if (!primary)
+		{
+			if (pinched_)
+				emit("up", cursor_);
+			if (present_)
+				emit("hide", cursor_);
+			reset();
+			return out;
+		}
+
+		// If the controlling hand changed (the first one left), release any pinch that belonged to the old hand.
+		int id = primary->value("id", 0);
+		if (primary_ != -1 && id != primary_ && pinched_)
+		{
+			emit("up", cursor_);
+			pinched_ = false;
+		}
+		primary_ = id;
+		present_ = true;
+
+		// Cursor: the engine's smoothed fingertip (normalized 0..1) converted to projector pixels through the calibration.
+		Vec2 tip{0.5, 0.5};
+		if (primary->contains("tip") && (*primary)["tip"].is_array() && (*primary)["tip"].size() == 2)
+			tip = {(*primary)["tip"][0].get<double>(), (*primary)["tip"][1].get<double>()};
+		cursor_ = m.to_px(cam, tip);
+		if (dist(cursor_, last_emit_) >= dz_) // only report movement beyond the dead zone
+		{
+			emit("move", cursor_);
+			last_emit_ = cursor_;
+		}
+
+		// The engine's events, in the order it reported them. Only the controlling hand can click.
+		if (motion.contains("events") && motion["events"].is_array())
+			for (const auto &ev : motion["events"])
+			{
+				std::string type = ev.value("type", "");
+				int hand = ev.value("hand_id", -1);
+				if (type == "PINCH_START" && hand == id && !pinched_)
+				{
+					pinched_ = true;
+					emit("down", cursor_);
+				}
+				else if (type == "PINCH_END" && hand == id && pinched_)
+				{
+					pinched_ = false;
+					emit("up", cursor_);
+				}
+				else if (type == "SWIPE_LEFT")
+					emit("swipe", cursor_, "left");
+				else if (type == "SWIPE_RIGHT")
+					emit("swipe", cursor_, "right");
+				else if (type == "SWIPE_UP")
+					emit("swipe", cursor_, "up");
+				else if (type == "SWIPE_DOWN")
+					emit("swipe", cursor_, "down");
+				else if (type == "ZOOM_IN")
+					emit("zoom", cursor_, "in");
+				else if (type == "ZOOM_OUT")
+					emit("zoom", cursor_, "out");
+			}
+	}
+	catch (const std::exception &)
+	{
+		// Wrong types in the message (e.g. a text where a number should be): ignore this frame's motion data.
+		out.clear();
+	}
+	return out;
+}
 } // namespace ips

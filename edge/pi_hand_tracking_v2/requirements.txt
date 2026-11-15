@@ -1,0 +1,2 @@
+# Install OpenCV with apt on Raspberry Pi when using Picamera2; see README.
+mediapipe>=0.10.31,<1.3

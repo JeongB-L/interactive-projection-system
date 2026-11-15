@@ -103,11 +103,29 @@ def script(t):
     return None
 
 
+# Two-hand zoom routine (only with --two-hands): from 10.2 s to 12 s two pointing hands appear close
+# together, then move apart. Returns how far apart they are (0 = close, 1 = far), or None outside that window.
+def zoom_phase(t):
+    t = t % PERIOD
+    if t < 10.2:
+        return None
+    if t < 10.4:
+        return 0.0
+    if t < 10.9:
+        return (t - 10.4) / 0.5
+    return 1.0
+
+
 # Produce one camera's JSON message for time t.
-def synthetic_frame(cam, seq, t, rng):
+def synthetic_frame(cam, seq, t, rng, two_hands=False):
     s = script(t)
     hands = []
-    if s:
+    zoom = zoom_phase(t) if two_hands else None
+    if zoom is not None:
+        # Two hands (a left and a right one) spreading apart: should make the tracker report a zoom in.
+        for x, right, score in ((0.40 - 0.18 * zoom, False, 0.95), (0.60 + 0.18 * zoom, True, 0.90)):
+            hands.append({"right": right, "score": score, "pts": make_hand(x, 0.5, "point", 0.0, rng, 0.002)})
+    elif s:
         pose, ax, ay, pinch = s
         # Camera 1 is made slightly noisier and offset so the two cameras do not agree exactly.
         noise = 0.002 if cam == 0 else 0.004
@@ -212,6 +230,26 @@ class OsPointer:
             self.g.press({"left": "left", "right": "right", "up": "up", "down": "down"}[a["detail"]])
 
 
+# ---------------------------------------------------------------- hand messages
+# Build the JSON message for one camera frame (the "hands" message the hub receives).
+def hands_message(cam, seq, ts, track_ms, hands, motion=None):
+    msg = {"t": "hands", "cam": cam, "seq": seq, "ts": ts, "track_ms": round(track_ms, 2), "hands": hands}
+    if motion is not None:
+        msg["motion"] = motion
+    return msg
+
+
+# Add Johnny's motion-engine result to a message (computed from the message's own hand landmarks), or
+# remove any old one if motion is switched off. `t_s` is the frame time in seconds.
+def attach_motion(args, msg, t_s):
+    bridge = getattr(args, "bridge", None)
+    if bridge is None:
+        msg.pop("motion", None)
+    else:
+        msg["motion"] = bridge.process(msg["cam"], msg["hands"], t_s)
+    return msg
+
+
 # ---------------------------------------------------------------- sources
 # Fake-hand source: sends the scripted hands at the chosen frame rate for each camera.
 def run_synthetic(link, args):
@@ -226,7 +264,8 @@ def run_synthetic(link, args):
         if args.seconds and now > args.seconds:
             break
         for i, cam in enumerate(args.cam_list):
-            link.send(synthetic_frame(i, seq[i], now, rng))
+            msg = synthetic_frame(i, seq[i], now, rng, getattr(args, "two_hands", False))
+            link.send(attach_motion(args, msg, now))
             seq[i] += 1
         n += 1
         delay = t0 + n / args.fps - time.time()
@@ -253,8 +292,11 @@ def run_replay(link, args):
             time.sleep(wait)
         if not link.alive:
             return
+        # Recompute the motion result from the recorded landmarks using the ORIGINAL frame time, so a replay
+        # is deterministic and always uses the current motion engine (any old recorded result is replaced).
+        original_t = m["ts"] / 1e6
         m = dict(m, ts=int(time.time() * 1e6))
-        link.send(m)
+        link.send(attach_motion(args, m, original_t))
     print("replayed", len(rows), "frames", flush=True)
 
 
@@ -262,7 +304,7 @@ def run_replay(link, args):
 # (setup.sh --pi downloads it to models/hand_landmarker.task); otherwise falls back to the older
 # mp.solutions.hands API, which some MediaPipe versions still include.
 class HandTracker:
-    def __init__(self, model_path):
+    def __init__(self, model_path, max_hands=1):
         import mediapipe as mp
         self.mp = mp
         if model_path and os.path.exists(model_path):
@@ -270,7 +312,7 @@ class HandTracker:
             from mediapipe.tasks.python import vision
             opts = vision.HandLandmarkerOptions(
                 base_options=mpt.BaseOptions(model_asset_path=model_path),
-                running_mode=vision.RunningMode.VIDEO, num_hands=1,
+                running_mode=vision.RunningMode.VIDEO, num_hands=max_hands,
                 min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.5, min_tracking_confidence=0.5)
             self.task = vision.HandLandmarker.create_from_options(opts)
             self.legacy = None
@@ -279,7 +321,7 @@ class HandTracker:
             if not hasattr(mp, "solutions"):
                 raise SystemExit("hand model not found at %s; run ./setup.sh --pi to download it" % model_path)
             self.task = None
-            self.legacy = mp.solutions.hands.Hands(max_num_hands=1, model_complexity=0,
+            self.legacy = mp.solutions.hands.Hands(max_num_hands=max_hands, model_complexity=0,
                                                    min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
     # Track hands in one RGB image; returns our JSON hand list (21 [x, y, z] points per hand).
@@ -342,9 +384,10 @@ def run_video(link, args):
     still = cv2.imread(args.video) if is_image else None
     if is_image and still is None:
         raise SystemExit("cannot read image " + args.video)
-    tracker = HandTracker(args.model)
+    tracker = HandTracker(args.model, args.max_hands)
     progress = Progress()
     seq = 0
+    read_since_rewind = 0  # frames read since the video last started from the beginning
     t_end = time.time() + args.seconds if args.seconds else None
     next_t = time.time()
     try:
@@ -355,16 +398,19 @@ def run_video(link, args):
             else:
                 ok, bgr = cap.read()
                 if not ok:
-                    if cap.get(cv2.CAP_PROP_POS_FRAMES) == 0:
+                    # End of the video: rewind. If nothing could be read since the last rewind, the file is unusable.
+                    if read_since_rewind == 0:
                         raise SystemExit("cannot read video " + args.video)
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    read_since_rewind = 0
                     continue
+                read_since_rewind += 1
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             ts = int(time.time() * 1e6)
             t0 = time.perf_counter()
             hands = tracker.process(rgb)
             track_ms = (time.perf_counter() - t0) * 1000
-            link.send({"t": "hands", "cam": 0, "seq": seq, "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
+            link.send(attach_motion(args, hands_message(0, seq, ts, track_ms, hands), time.monotonic()))
             seq += 1
             progress.add(bool(hands), track_ms)
             # Keep the chosen frame rate (never sleep a negative time if tracking is slower than that).
@@ -379,41 +425,40 @@ def run_video(link, args):
 # Real-camera source: grab frames, run MediaPipe hand tracking, send the landmarks (and optionally JPEGs).
 def run_camera(link, args):
     import cv2
-    # Choose between Pi CSI cameras (picamera2) and USB / V4L2 cameras (OpenCV).
-    use_pi = args.source == "picamera"
-    if use_pi:
-        from picamera2 import Picamera2
-        cams = []
-        for c in args.cam_list:
-            p = Picamera2(c)
-            # picamera2's "RGB888" format is stored in B, G, R byte order, i.e. what OpenCV calls BGR.
-            p.configure(p.create_video_configuration(main={"size": (640, 480), "format": "RGB888"}))
-            p.start()
-            cams.append(p)
-    else:
-        cams = [cv2.VideoCapture(c) for c in args.cam_list]
-    # One tracker per camera, because each keeps its own tracking state between frames.
-    trackers = [HandTracker(args.model) for _ in cams]
-    seq = [0] * len(cams)
-    t_end = time.time() + args.seconds if args.seconds else None
-    progress = Progress()
+    from motion_bridge import camera_class
+    # Johnny's capture class: one thread per camera that always keeps only the NEWEST frame, so tracking
+    # never works on a stale image. "picamera2" = Pi CSI cameras, "opencv" = USB / V4L2 cameras.
+    Camera = camera_class()
+    backend = "picamera2" if args.source == "picamera" else "opencv"
+    cams = []
+    trackers = []
     try:
+        for idx in args.cam_list:
+            cams.append(Camera(backend, idx, 640, 480, int(args.fps), args.exposure_us, args.gain).start())
+        # One tracker per camera, because each keeps its own tracking state between frames.
+        trackers = [HandTracker(args.model, args.max_hands) for _ in cams]
+        seq = [0] * len(cams)
+        last_seq = [0] * len(cams)
+        t_end = time.time() + args.seconds if args.seconds else None
+        progress = Progress()
         while link.alive and (t_end is None or time.time() < t_end):
             for i, cam in enumerate(cams):
-                # Get the frame as BGR (for JPEG encoding) and RGB (what MediaPipe expects).
-                if use_pi:
-                    bgr = cam.capture_array()
-                else:
-                    ok, bgr = cam.read()
-                    if not ok:
-                        continue
+                # Wait briefly for this camera's newest frame (None = nothing new yet).
+                newest = cam.newest(last_seq[i], timeout=0.2 if len(cams) > 1 else 2.0)
+                if newest is None:
+                    continue
+                bgr, frame_t, cam_seq = newest
+                last_seq[i] = cam_seq
+                if args.mirror:
+                    bgr = cv2.flip(bgr, 1)
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                ts = int(time.time() * 1e6)
+                # Wall-clock capture time = now minus how old the frame already is.
+                ts = int((time.time() - (time.monotonic() - frame_t)) * 1e6)
                 t0 = time.perf_counter()
                 # Run hand tracking and time it: this 'track_ms' is what the benchmark compares.
                 hands = trackers[i].process(rgb)
                 track_ms = (time.perf_counter() - t0) * 1000
-                link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
+                link.send(attach_motion(args, hands_message(i, seq[i], ts, track_ms, hands), frame_t))
                 seq[i] += 1
                 progress.add(bool(hands), track_ms)
                 # Optionally also send the camera image so the hub can store video.
@@ -421,15 +466,31 @@ def run_camera(link, args):
                     ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if ok:
                         link.send_jpeg(i, jpg.tobytes())
+    except RuntimeError as exc:
+        # Johnny's camera class reports camera failures as RuntimeError: show a clear message.
+        raise SystemExit("camera error: %s" % exc)
     finally:
-        # Close the trackers cleanly (avoids a harmless but noisy error message at exit).
+        # Stop the cameras and close the trackers cleanly (avoids a noisy error message at exit).
+        for c in cams:
+            c.stop()
         for t in trackers:
             t.close()
 
 
 # ---------------------------------------------------------------- main
+# Make printing never crash: error messages from the operating system can contain characters (for example a
+# localized "connection refused") that a plain ASCII / cp1252 console or log file cannot encode.
+def safe_console():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 # Read the command line, pick the source, and keep reconnecting if the hub goes away.
 def main():
+    safe_console()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hub", default="127.0.0.1:8080")
     ap.add_argument("--source", choices=["synthetic", "replay", "camera", "picamera", "video"], default="synthetic")
@@ -443,8 +504,20 @@ def main():
     ap.add_argument("--os-pointer", action="store_true", help="inject real OS mouse events (needs pyautogui)")
     ap.add_argument("--send-frames", action="store_true", help="also send JPEG frames (the hub stores them if record.frames is true)")
     ap.add_argument("--device", default="pi5")
+    ap.add_argument("--max-hands", type=int, choices=[1, 2], default=1,
+                    help="hands to track per camera (1 = cursor only; 2 enables two-hand zoom but costs more CPU)")
+    ap.add_argument("--no-motion", action="store_true", help="do not run Johnny's motion engine (send raw landmarks only)")
+    ap.add_argument("--mirror", action="store_true", help="flip the camera image horizontally (calibration normally makes this unnecessary)")
+    ap.add_argument("--exposure-us", type=int, default=None, help="Pi camera manual exposure in microseconds (e.g. 5000 for fast motion)")
+    ap.add_argument("--gain", type=float, default=None, help="Pi camera analogue gain when --exposure-us is used")
+    ap.add_argument("--two-hands", action="store_true", help="synthetic source only: add a two-hand zoom to the scripted routine")
     args = ap.parse_args()
     args.cam_list = args.cams
+    # Johnny's motion engine: one per camera, run on every source so the hub can use or compare its events.
+    args.bridge = None
+    if not args.no_motion:
+        from motion_bridge import MotionBridge
+        args.bridge = MotionBridge(max(args.max_hands, 2 if args.two_hands else 1))
     # Map the chosen --source to the function that implements it.
     runner = {"synthetic": run_synthetic, "replay": run_replay, "camera": run_camera, "picamera": run_camera, "video": run_video}[args.source]
     # Connect and run; on connection failure wait 2 seconds and try again.
