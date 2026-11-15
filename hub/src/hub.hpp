@@ -37,7 +37,7 @@ namespace ips
 	struct Config
 	{
 		int port = 8080;
-		std::string bind = "0.0.0.0";				// network interface to listen on
+		std::string bind = "127.0.0.1"; // network interface to listen on: this computer only (use 0.0.0.0 to let a separate Pi connect)
 		std::string ui_dir = "ui";					// folder with the display page and apps
 		std::string db_path = "data/ips.db";		// SQLite catalog
 		std::string blob_uri = "file:./data/blobs"; // where files (video, recordings) are stored
@@ -83,6 +83,7 @@ namespace ips
 		json status();			// live numbers for the status page
 		json apps_json() const; // list of configured apps
 		Catalog &catalog() { return *catalog_; }
+		void note_bad_message(); // count a message the server received but could not understand
 		const Config &config() const { return cfg_; }
 
 	private:

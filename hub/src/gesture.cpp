@@ -12,6 +12,7 @@
 #include "gesture.hpp"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace ips
 {
@@ -93,8 +94,12 @@ namespace ips
 	Vec2 Mapper::to_px(int cam, Vec2 n) const
 	{
 		auto it = hs_.find(cam);
+		// Calibrated cameras map to FRACTIONS of the screen (0..1), scaled here by the current display size.
 		if (it != hs_.end())
-			return it->second.apply(n);
+		{
+			Vec2 f = it->second.apply(n);
+			return {f.x * w_, f.y * h_};
+		}
 		return {n.x * w_, n.y * h_};
 	}
 
@@ -103,6 +108,7 @@ namespace ips
 	{
 		json j;
 		j["screen"] = {w_, h_};
+		j["normalized"] = true; // homographies map to fractions of the screen (older files stored raw pixels)
 		for (const auto &[c, h] : hs_)
 			j["cams"][std::to_string(c)] = h.h;
 		return j;
@@ -112,6 +118,11 @@ namespace ips
 	void Mapper::from_json(const json &j)
 	{
 		hs_.clear();
+		if (!j.value("normalized", false)) // an older calibration file in raw pixels cannot be reused safely
+		{
+			std::fprintf(stderr, "old calibration file format ignored: please run `python ips.py calibrate` again\n");
+			return;
+		}
 		if (j.contains("cams"))
 			for (const auto &[k, v] : j["cams"].items())
 			{

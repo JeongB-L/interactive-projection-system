@@ -2,8 +2,9 @@
 {
   // Port the hub listens on (the display page is http://<laptop>:8080/ui/display.html).
   "port": 8080,
-  // Network interface to listen on: 0.0.0.0 = all (so the Pi can connect), 127.0.0.1 = this computer only.
-  "bind": "0.0.0.0",
+  // Network interface to listen on. 127.0.0.1 = this computer only (safe default; right when the hub and the Pi display are
+  // the same machine). Use 0.0.0.0 ONLY if a separate Pi must connect, and then also set IPS_TOKEN in .env.
+  "bind": "127.0.0.1",
   // Projector size in pixels until the display page reports its real size.
   "screen_w": 1920,
   "screen_h": 1080,

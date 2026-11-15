@@ -9,11 +9,15 @@
 #     2. gesture_source "edge" : Johnny's engine acts (our rules still supply "home")
 #     3. "edge" with the agent's motion engine switched off: the hub falls back to its own rules
 #     4. recording + replay    : a recorded session replayed into a fresh hub gives the SAME engine results
+#   Plus a "Hardening" group that attacks the hub: URLs that try to leave the web folder, sensitive calls from another
+#   machine, malformed messages, and a stuck display connection (each of these was a real bug found in review).
 #   Each scenario plays the scripted 12-second routine (2 clicks, a swipe, an open-palm hold, a two-hand zoom).
 #   Run:  python ips.py test --e2e      (takes about a minute)
 # ---------------------------------------------------------------------------
 import glob
+import http.client
 import json
+import socket
 import os
 import shutil
 import subprocess
@@ -27,6 +31,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import ips  # noqa: E402  (for ips.EXE and the toolchain environment)
 
+# Which hub program to test (set IPS_HUB_EXE to test an older build, e.g. to prove a new test catches an old bug).
+EXE = os.environ.get("IPS_HUB_EXE", ips.EXE)
 PORT = 8099
 RUN_SECONDS = 13  # one full 12-second routine plus a second of the next one
 
@@ -34,21 +40,22 @@ RUN_SECONDS = 13  # one full 12-second routine plus a second of the next one
 class HubProcess:
     """Starts the real hub with a throw-away config and storage folder; stops it (flushing recordings) on exit."""
 
-    def __init__(self, gesture_source):
+    def __init__(self, gesture_source, bind="127.0.0.1", env=None):
+        self.env = env or {}
         self.dir = tempfile.mkdtemp(prefix="ips_e2e_")
         with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as f:
             text = "\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("//"))
         cfg = json.loads(text)
         cfg.update(port=PORT, ui_dir=os.path.join(ROOT, "ui"), gesture_source=gesture_source,
                    db_path=os.path.join(self.dir, "ips.db"), blob_uri="file:" + os.path.join(self.dir, "blobs").replace("\\", "/"),
-                   calib_path=os.path.join(self.dir, "calibration.json"), bind="127.0.0.1")
+                   calib_path=os.path.join(self.dir, "calibration.json"), bind=bind)
         self.cfg_path = os.path.join(self.dir, "config.json")
         with open(self.cfg_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f)
         self.log = open(os.path.join(self.dir, "hub.log"), "wb")
 
     def __enter__(self):
-        self.proc = subprocess.Popen([ips.EXE, "--config", self.cfg_path], cwd=ROOT, env=ips.tool_env(),
+        self.proc = subprocess.Popen([EXE, "--config", self.cfg_path], cwd=ROOT, env=dict(ips.tool_env(), **self.env),
                                      stdout=self.log, stderr=self.log)
         for _ in range(100):
             if self.try_get("/api/status") is not None:
@@ -92,7 +99,7 @@ class HubProcess:
         return glob.glob(os.path.join(self.dir, "blobs", "sessions", "*", "events.ndjson"))
 
 
-@unittest.skipUnless(os.path.exists(ips.EXE), "build the hub first: python ips.py build")
+@unittest.skipUnless(os.path.exists(EXE), "build the hub first: python ips.py build")
 class EndToEnd(unittest.TestCase):
     def test_1_hub_mode_our_rules_act_and_johnnys_engine_is_compared(self):
         with HubProcess("hub") as hub:
@@ -168,6 +175,169 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual("synthetic", sessions[0]["source"])
         self.assertEqual(1, len(assets))
         self.assertGreater(assets[0]["bytes"], 0)
+
+
+# ---- helpers for the hardening tests ---------------------------------------------------------------------
+
+def http_request(host, method, path, body=None, headers=None, timeout=5):
+    """One raw HTTP request with the path sent EXACTLY as given (urllib would tidy it up). Returns (status, text)."""
+    conn = http.client.HTTPConnection(host, PORT, timeout=timeout)
+    try:
+        conn.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=headers or {})
+        r = conn.getresponse()
+        return r.status, r.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+
+
+def lan_address():
+    """This computer's address on the network (not 127.x), or None when there is none."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        addr = s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return None if addr.startswith("127.") else addr
+
+
+@unittest.skipUnless(os.path.exists(EXE), "build the hub first: python ips.py build")
+class Hardening(unittest.TestCase):
+    def test_h1_a_url_can_never_leave_the_web_folder(self):
+        secret_file = os.path.join(ROOT, "config.json").replace("\\", "/")  # a file OUTSIDE ui/ with recognizable content
+        no_drive = secret_file[2:] if secret_file[1:2] == ":" else secret_file
+        attacks = ["/ui/" + secret_file, "/ui//" + secret_file, "/ui//" + no_drive, "/apps//" + no_drive,
+                   "/apps///" + no_drive, "/ui/../config.json", "/ui/a/../../config.json", "/ui/%2e%2e/config.json",
+                   "/ui/..%2fconfig.json", "/ui/..\\config.json", "/ui/\\..\\config.json", "/apps/../../config.json",
+                   "/ui/C:/Windows/win.ini", "/ui/./../config.json"]
+        with HubProcess("hub") as hub:
+            for url in attacks:
+                with self.subTest(url=url):
+                    status, text = http_request("127.0.0.1", "GET", url)
+                    self.assertIn(status, (400, 403, 404), "got %d for %s" % (status, url))
+                    self.assertNotIn("gesture_source", text, "the hub leaked a file outside ui/ for " + url)
+            # ... while the real pages still work
+            for good in ("/ui/display.html", "/apps/launcher.html", "/apps/snake.html", "/status", "/ui/status.html"):
+                status, text = http_request("127.0.0.1", "GET", good)
+                self.assertEqual(200, status, good)
+                self.assertIn("<", text)
+
+    def test_h2_the_default_setup_only_listens_on_this_computer(self):
+        with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as f:
+            cfg = json.loads("\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("//")))
+        self.assertEqual("127.0.0.1", cfg["bind"], "config.json must not listen on the network by default")
+        lan = lan_address()
+        if not lan:
+            self.skipTest("no network address on this computer")
+        with HubProcess("hub") as hub:  # started with the repository's default bind (127.0.0.1)
+            with self.assertRaises(OSError):
+                http_request(lan, "GET", "/api/status", timeout=3)
+
+    def test_h3_sensitive_calls_from_another_machine_need_the_token(self):
+        lan = lan_address()
+        if not lan:
+            self.skipTest("no network address on this computer")
+        with HubProcess("hub", bind="0.0.0.0", env={"IPS_TOKEN": "tok-123"}) as hub:
+            # open to anyone: status, app list, and what the projected page itself needs
+            self.assertEqual(200, http_request(lan, "GET", "/api/status")[0])
+            self.assertEqual(200, http_request(lan, "GET", "/api/apps")[0])
+            self.assertEqual(200, http_request(lan, "POST", "/api/display_size", {"w": 1920, "h": 1080})[0])
+            self.assertEqual(200, http_request(lan, "POST", "/api/launch", {"app": "snake"})[0])
+            self.assertEqual(200, http_request(lan, "POST", "/api/home", {})[0])
+            # sensitive: refused from another machine
+            for method, path, body in [("POST", "/api/shutdown", {}), ("POST", "/api/ai", {"prompt": "hi"}),
+                                       ("POST", "/api/launch", {"url": "http://evil.example/"}),
+                                       ("POST", "/api/calibrate/start", {}), ("POST", "/api/calibrate/reset", {}),
+                                       ("POST", "/api/brightness", {"value": 0.1}), ("GET", "/api/sessions", None),
+                                       ("GET", "/api/assets", None)]:
+                with self.subTest(call=method + " " + path):
+                    self.assertEqual(403, http_request(lan, method, path, body)[0])
+                    self.assertEqual(403, http_request(lan, method, path, body, {"X-IPS-Token": "wrong"})[0])
+            self.assertEqual(200, http_request("127.0.0.1", "GET", "/api/status")[0], "the refused shutdown must not stop the hub")
+            # with the token it works
+            self.assertEqual(200, http_request(lan, "GET", "/api/sessions", None, {"X-IPS-Token": "tok-123"})[0])
+            # from this computer no token is needed (the ips.py tool, the Pi's own browser)
+            status, text = http_request("127.0.0.1", "POST", "/api/ai", {"prompt": "hi"})
+            self.assertNotEqual(403, status)
+
+    def test_h4_without_a_token_nothing_sensitive_is_allowed_remotely(self):
+        lan = lan_address()
+        if not lan:
+            self.skipTest("no network address on this computer")
+        with HubProcess("hub", bind="0.0.0.0") as hub:
+            self.assertEqual(403, http_request(lan, "POST", "/api/shutdown", {}, {"X-IPS-Token": ""})[0])
+            self.assertEqual(403, http_request(lan, "POST", "/api/shutdown", {}, {"X-IPS-Token": "anything"})[0])
+            self.assertEqual(200, http_request("127.0.0.1", "GET", "/api/status")[0])
+
+    def test_h5_malformed_messages_do_not_kill_the_agent_connection(self):
+        sys.path.insert(0, os.path.join(ROOT, "edge"))
+        from wsclient import WS
+        with HubProcess("hub") as hub:
+            ws = WS("127.0.0.1", PORT, "/edge")
+            ws.send_text(json.dumps({"t": "hello", "device": "bad-message-test", "source": "test"}))
+            time.sleep(0.4)
+            self.assertTrue(hub.status()["edge_connected"])
+            for bad in (json.dumps({"t": 5}), json.dumps({"t": ["x"]}), "this is not json", json.dumps([1, 2, 3]),
+                        json.dumps({"t": "hands", "cam": "zero", "seq": "x", "hands": 7}), json.dumps({"t": "ping", "ts": "soon"})):
+                ws.send_text(bad)
+            ws.send_binary(b"\x00")  # too short to be a frame
+            ws.send_text(json.dumps({"t": "hands", "cam": 0, "seq": 1, "ts": 1, "track_ms": 1.0, "hands": []}))  # a good one
+            time.sleep(0.6)
+            s = hub.status()
+            self.assertEqual(1, s["cameras"]["0"]["frames"], "the connection must still deliver good frames after bad ones")
+            self.assertGreaterEqual(s["bad_messages"], 4)
+            self.assertTrue(s["edge_connected"])
+            ws.close()
+            time.sleep(0.8)
+            s = hub.status()
+            self.assertFalse(s["edge_connected"], "the hub must notice when the agent is gone")
+            self.assertEqual(0, s["session"])
+            sessions = hub.try_get("/api/sessions")
+            self.assertTrue(sessions[0]["ended_utc"], "the recording session must be closed")
+
+    def test_h6_a_stuck_display_cannot_freeze_the_hub(self):
+        sys.path.insert(0, os.path.join(ROOT, "edge"))
+        from wsclient import WS
+        import threading
+        with HubProcess("hub") as hub:
+            stuck = WS("127.0.0.1", PORT, "/display")  # connects, then never reads (a frozen browser tab)
+            time.sleep(0.3)
+            big_url = "/apps/launcher.html?" + "x" * 900_000  # each launch broadcasts a ~0.9 MB message to every display
+
+            def flood():
+                for _ in range(60):
+                    try:
+                        hub.post("/api/launch", {"app": big_url})
+                    except Exception:
+                        return
+            threading.Thread(target=flood, daemon=True).start()
+            time.sleep(5)
+            t0 = time.time()
+            status = hub.try_get("/api/status")
+            self.assertIsNotNone(status, "the hub stopped answering while one display was stuck")
+            self.assertLess(time.time() - t0, 2.0)
+            # a healthy display connected now still gets the current content
+            healthy = WS("127.0.0.1", PORT, "/display")
+            first = json.loads(healthy.recv_text())
+            self.assertEqual("content", first["t"])
+            healthy.close()
+            stuck.close()
+
+    def test_h7_fps_is_measured_over_recent_frames_only(self):
+        with HubProcess("hub") as hub:
+            hub.agent(seconds=2)       # a first run, then a pause
+            time.sleep(3)
+            cmd = [sys.executable, os.path.join(ROOT, "edge", "agent.py"), "--hub", "127.0.0.1:%d" % PORT,
+                   "--source", "synthetic", "--seconds", "6"]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                time.sleep(3.5)
+                fps = hub.status()["fps_total"]
+            finally:
+                proc.wait(timeout=30)
+            self.assertTrue(25 <= fps <= 35, "expected about 30 frames/s, the status page said %.1f" % fps)
 
 
 if __name__ == "__main__":

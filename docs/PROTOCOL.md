@@ -75,6 +75,20 @@ The same `action` messages go to the agent when it said `os_pointer:true`, so a 
 
 Static: `/ui/display.html`, `/status`, `/apps/*.html`.
 
+## Who may call what
+
+| Caller | Allowed |
+|---|---|
+| This computer (loopback) | everything |
+| Another machine, no token | `GET /api/status`, `GET /api/apps`, static pages, `POST /api/display_size`, `POST /api/home`, `POST /api/launch` of a configured app, the `/display` socket, the `/edge` socket (checked by the hello token when `IPS_TOKEN` is set) |
+| Another machine **with** `X-IPS-Token: <IPS_TOKEN>` | everything |
+| Another machine, wrong or no token, sensitive call | HTTP 403 `{"ok":false,"error":"forbidden: ..."}` |
+
+Sensitive = `POST /api/shutdown`, `/api/ai`, `/api/calibrate/start|reset`, `/api/brightness`, `/api/launch` with a URL that is not a configured app, `GET /api/sessions`, `GET /api/assets`.
+URLs under `/ui/` and `/apps/` can only name files inside the `ui/` folder; anything else is a 404.
+A malformed message on `/edge` is counted in `bad_messages` and skipped; it never closes the connection.
+Large messages may reach a client split into several WebSocket frames (normal; browsers and the agent's client reassemble them).
+
 ## Rules
 - The hub always uses the newest data: a camera not heard from for `stale_ms` (150 ms) is ignored, so a stalled camera cannot move the cursor.
 - Click/swipe/home actions are never merged or dropped; `move` actions are suppressed inside the dead zone.

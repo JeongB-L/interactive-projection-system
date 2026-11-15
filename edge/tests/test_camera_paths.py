@@ -43,6 +43,7 @@ class FakeTracker:
 class FakeCamera:
     instances = []
     fail_after = None
+    silent = False  # True: the camera never delivers a frame (cable pulled, another program holds it)
 
     def __init__(self, backend, index, width, height, fps, exposure_us=None, gain=None):
         self.args = (backend, index, width, height, fps, exposure_us, gain)
@@ -54,6 +55,9 @@ class FakeCamera:
         return self
 
     def newest(self, last_seq, timeout=2.0):
+        if FakeCamera.silent:
+            time.sleep(0.02)
+            return None
         time.sleep(0.004)
         self.n += 1
         if FakeCamera.fail_after is not None and self.n > FakeCamera.fail_after:
@@ -139,13 +143,15 @@ class RunCamera(unittest.TestCase):
         FakeTracker.instances.clear()
         FakeCamera.instances.clear()
         FakeCamera.fail_after = None
-        self._saved = (agent.HandTracker, motion_bridge.camera_class)
+        FakeCamera.silent = False
+        self._saved = (agent.HandTracker, motion_bridge.camera_class, agent.STALL_WARN_SECONDS)
         agent.HandTracker = FakeTracker
         motion_bridge.camera_class = lambda: FakeCamera
         self.addCleanup(self.restore)
 
     def restore(self):
-        agent.HandTracker, motion_bridge.camera_class = self._saved
+        agent.HandTracker, motion_bridge.camera_class, agent.STALL_WARN_SECONDS = self._saved
+        FakeCamera.silent = False
 
     def run_it(self, **kw):
         link = FakeLink()
@@ -209,6 +215,26 @@ class RunCamera(unittest.TestCase):
         link.alive = False
         agent.run_camera(link, make_args(source="picamera", seconds=5, fps=30))
         self.assertEqual([], link.sent)
+
+    def test_a_silent_camera_triggers_a_warning_instead_of_waiting_silently(self):
+        import contextlib
+        import io
+        FakeCamera.silent = True
+        agent.STALL_WARN_SECONDS = 0.1
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agent.run_camera(FakeLink(), make_args(source="picamera", seconds=0.6, fps=30, cam_list=[3]))
+        self.assertIn("camera 3 has delivered no frames", buf.getvalue())
+        self.assertLess(buf.getvalue().count("no frames"), 8)  # a warning every so often, not a flood
+
+    def test_no_warning_while_frames_keep_coming(self):
+        import contextlib
+        import io
+        agent.STALL_WARN_SECONDS = 0.1
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agent.run_camera(FakeLink(), make_args(source="picamera", seconds=0.4, fps=30))
+        self.assertNotIn("no frames", buf.getvalue())
 
     def test_no_motion_key_when_motion_is_off(self):
         link = FakeLink()

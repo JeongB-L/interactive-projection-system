@@ -19,20 +19,22 @@ WHAT THIS FILE DOES
 <h2>Interactive Projection System: hub status</h2>
 <div id="o">loading...</div>
 <script>
+// Escape text from the hub before it goes into the page (a device name sent by an agent could contain HTML).
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Format a number with d decimals ('-' when it is missing).
 const f = (v, d = 1) => (v === undefined || v === null) ? '-' : Number(v).toFixed(d);
 // Fetch /api/status and redraw the table; show 'hub not reachable' if the request fails.
 async function tick() {
   try {
     const s = await (await fetch('/api/status')).json();
-    const cams = Object.entries(s.cameras).map(([c, v]) => `cam${c}: ${v.frames} frames, calibrated: ${v.calibrated}`).join('<br>') || '-';
-    const gc = Object.entries(s.gesture_counts).map(([k, v]) => `${k}=${v}`).join(' ') || '-';
-    const last = s.last_gestures.slice().reverse().map(g => g.kind + (g.dir ? ' ' + g.dir : '')).join(', ') || '-';
+    const cams = Object.entries(s.cameras).map(([c, v]) => `cam${esc(c)}: ${esc(v.frames)} frames, calibrated: ${esc(v.calibrated)}`).join('<br>') || '-';
+    const gc = Object.entries(s.gesture_counts).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' ') || '-';
+    const last = s.last_gestures.slice().reverse().map(g => esc(g.kind + (g.dir ? ' ' + g.dir : ''))).join(', ') || '-';
     document.getElementById('o').innerHTML = `
       <table>
-      <tr><th>Edge (Pi)</th><td class="${s.edge_connected ? 'ok' : 'bad'}">${s.edge_connected ? 'connected: ' + s.edge_device : 'not connected'}</td></tr>
+      <tr><th>Edge (Pi)</th><td class="${s.edge_connected ? 'ok' : 'bad'}">${s.edge_connected ? 'connected: ' + esc(s.edge_device) : 'not connected'}</td></tr>
       <tr><th>Display pages</th><td>${s.displays}</td></tr>
-      <tr><th>App</th><td>${s.app}</td></tr>
+      <tr><th>App</th><td>${esc(s.app)}</td></tr>
       <tr><th>Frames/s (all cameras)</th><td>${f(s.fps_total)}</td></tr>
       <tr><th>Cameras</th><td>${cams}</td></tr>
       <tr><th>Hub processing ms (p50 / p95)</th><td>${f(s.hub_ms.p50, 3)} / ${f(s.hub_ms.p95, 3)}</td></tr>
@@ -42,7 +44,7 @@ async function tick() {
       <tr><th>JPEG frames received</th><td>${s.jpeg_frames}</td></tr>
       <tr><th>Gestures</th><td>${gc}</td></tr>
       <tr><th>Last</th><td>${last}</td></tr>
-      <tr><th>Session / storage</th><td>#${s.session} &nbsp; <code>${s.blob_base}</code></td></tr>
+      <tr><th>Session / storage</th><td>#${s.session} &nbsp; <code>${esc(s.blob_base)}</code></td></tr>
       </table>`;
   } catch (e) { document.getElementById('o').innerHTML = '<span class="bad">hub not reachable</span>'; }
 }

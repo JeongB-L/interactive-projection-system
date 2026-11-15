@@ -85,21 +85,31 @@ class WS:
 
     # Wait for the next text message from the hub; answer pings; raise WSClosed when the server closes.
     def recv_text(self):
-        """Blocks until a text frame arrives; answers pings; raises WSClosed on close."""
+        """Blocks until a complete text message arrives; answers pings; raises WSClosed on close.
+        A big message may arrive split into several frames (the first has the text opcode, the rest are
+        'continuation' frames, and the last one has the FIN bit set): they are joined back together here."""
+        parts = []
         while True:
             b0, b1 = self._read(2)
-            op, n = b0 & 0x0F, b1 & 0x7F
+            fin, op, n = bool(b0 & 0x80), b0 & 0x0F, b1 & 0x7F
             if n == 126:
                 n = struct.unpack(">H", self._read(2))[0]
             elif n == 127:
                 n = struct.unpack(">Q", self._read(8))[0]
             data = self._read(n)  # server frames are unmasked
-            if op == 0x1:
-                return data.decode()
-            if op == 0x9:
+            if op == 0x1:          # start of a text message
+                parts = [data]
+            elif op == 0x0:        # continuation of the message in progress
+                parts.append(data)
+            elif op == 0x9:        # ping: answer it (a ping may arrive between the fragments of a message)
                 self._send(0xA, data)
+                continue
             elif op == 0x8:
                 raise WSClosed("server closed")
+            else:
+                continue           # pong or binary: ignore
+            if fin and parts:
+                return b"".join(parts).decode()
 
     # Close the socket (ignore errors).
     def close(self):

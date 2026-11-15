@@ -6,6 +6,17 @@ Related: [DESIGN.md](DESIGN.md) (rationale) · [INTERFACES.md](INTERFACES.md) (C
 **MUST** = required for the prototype, **SHOULD** = target, **MAY** = optional.
 The **Status** column says what exists in the repo today: Done (built and tested), Partial, Untested (written, no hardware to test), Not yet.
 
+## Changes in 1.5 (code review)
+
+A review found, reproduced and fixed these problems (each reproduced against the old hub first; each now has a regression test that fails on the old code):
+- **Any machine that could reach the hub could read any file on it** (including `.env` with the AI key): a URL with a double slash escaped the web folder. Fixed; URLs are confined to `ui/`.
+- **The hub listened on the whole network with no access control**, so anyone on the same Wi-Fi could shut it down, use the AI key, or list stored files. The default is now this computer only; sensitive calls from elsewhere need `IPS_TOKEN`. (F-40)
+- **One malformed message from the agent silently killed its connection** while the hub kept reporting it as connected (recording never closed). Now counted and skipped; cleanup always runs. (F-41)
+- **One stuck display (frozen tab, dead Wi-Fi) could freeze the whole hub**, because it did blocking network writes while holding the shared lock. Each peer now has its own send queue and writer thread. (F-41)
+- **Calibration broke if the display size changed after calibrating** (it was stored in raw pixels). Now stored as fractions of the screen; old files are ignored with a message.
+- The status page put device names into HTML unescaped (script injection); the status page's frames-per-second was dragged down by idle gaps; the agent now warns when a camera goes silent; MediaPipe is pinned to the supported range.
+- Test counts now: 110 C++ checks, 126 Python tests, Johnny's 13, 12 end-to-end scenarios.
+
 ## Changes in 1.4
 
 - **Johnny's hand tracker is integrated** (kept byte-for-byte unchanged in `edge/pi_hand_tracking_v2/`, guarded by a fingerprint test).
@@ -118,6 +129,8 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 | F-36 | The agent runs his MotionEngine on every frame of every source (camera, video, synthetic, replay) and attaches the result as `motion`. His LatestFrameCamera supplies camera frames. | MUST | Done in simulation; camera path Untested on the Pi |
 | F-37 | `gesture_source` (`hub`/`edge`) chooses which engine acts; the other is compared (`compare`). Fallback to our rules when no motion data arrives. | MUST | Done |
 | F-38 | Zoom in/out from two hands is delivered to apps (`ips-zoom`). | SHOULD | Done in simulation; needs `--max-hands 2` on the Pi |
+| F-40 | Safe by default: the hub listens on this computer only; sensitive API calls from other machines need `IPS_TOKEN`; URLs cannot leave `ui/`. | MUST | Done (e2e `Hardening` tests) |
+| F-41 | Robust connections: malformed messages are skipped; a stuck client cannot block the hub; cleanup always runs when a connection ends. | MUST | Done (e2e `Hardening` tests) |
 | F-33 | `setup.ps1` / `setup.sh` install dependencies, build, and test from a fresh clone; documented in the README. | MUST | See section 8 |
 | F-32 | CLI `ips.py`: start, stop, status, sim, open, launch, home, calibrate, apps, sessions, assets, bench, migrate-uri, logs. | MUST | Done |
 
@@ -197,6 +210,8 @@ Endpoints: `ws://hub:8080/edge`, `ws://hub:8080/display`, `GET /status`, `GET /a
 | Tests can fail | 3 deliberate breakages (his pinch threshold; edge mode never acting; wrong hand clicking) were each caught, then reverted |
 | Bugs found by the tests | agent crashed printing a localized OS error; a corrupt video made the video source loop forever (both fixed, with regression tests) |
 | Observed on the real Pi earlier | 22-28 frames/s and 35-43 ms tracking per frame with one hand (our agent, before this change) |
+
+**Added 2026-11-14 (code review):** the hardening scenarios (URL escape attempts incl. 14 variants, access control from a second network address with and without token, malformed messages, a stuck display, fps after a pause) pass on the fixed hub and **fail on the previous build** (checked by building the earlier commit). A hostile device name sent by an agent shows as plain text in a real browser. 110 C++ checks, 126 Python tests, 13 of Johnny's, 12 end-to-end scenarios: all pass.
 
 **Still not verified:** the integrated path with real hands on the Pi (Johnny reports his standalone app catches real pinches and two hands), real-hand comparison of the two engines, and CPU cost of `--max-hands 2` together with the browser and hub.
 

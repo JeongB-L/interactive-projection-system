@@ -83,6 +83,9 @@ def api(path, body=None, timeout=5):
     # Build the request.
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(BASE + path, data=data, method="POST" if body is not None else "GET")
+    # A hub on another machine only accepts sensitive calls that carry the secret IPS_TOKEN (set it in your environment).
+    if os.environ.get("IPS_TOKEN"):
+        req.add_header("X-IPS-Token", os.environ["IPS_TOKEN"])
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())

@@ -63,6 +63,21 @@ What to check first on the real Pi (none of this has run on hardware yet):
 5. If `import picamera2, mediapipe` fails with a numpy error: `.venv/bin/pip install "numpy<2"`.
 6. Camera video fills disk fast (about 2 MB/s per camera); prefer an SSD over the SD card if you record video.
 
+## Who can reach the hub (security)
+
+By default the hub listens on **this computer only** (`"bind": "127.0.0.1"` in `config.json`). That is the right setting when the hub,
+the camera agent and the projected page all run on the Pi, and nobody else on the network can see it.
+
+If a *separate* Pi must connect to a hub on a laptop, set `"bind": "0.0.0.0"` **and** put a secret in `.env`:
+```
+IPS_TOKEN=pick-a-long-random-string
+```
+Then: the agent sends the token when it connects (`export IPS_TOKEN=...` on the Pi too); calls that change the hub or spend the AI key
+(`/api/shutdown`, `/api/ai`, `/api/calibrate/*`, `/api/brightness`, opening an arbitrary URL, listing stored files) are refused from
+other machines unless they carry the token in an `X-IPS-Token` header (`ips.py` does this automatically when `IPS_TOKEN` is set).
+The projected page can still switch between configured apps, go home and report its size from another machine; the AI app in that split setup
+is refused (run everything on the Pi, or open the AI page on the hub computer). Never put the hub on an untrusted network without the token.
+
 ## Choosing the gesture engine
 
 `config.json` has `"gesture_source": "hub"` (our C++ rules, the default) or `"edge"` (Johnny's motion engine running on the Pi).

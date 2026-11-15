@@ -282,7 +282,7 @@ namespace ips
 				// All four collected: solve one homography per camera that saw every marker.
 				std::array<Vec2, 4> dst;
 				for (int i = 0; i < 4; ++i)
-					dst[i] = {ix[i] * mapper_.width(), iy[i] * mapper_.height()};
+					dst[i] = {ix[i], iy[i]}; // fractions of the screen, so the calibration still fits if the display size changes
 				std::map<int, int> n;
 				for (auto &s : calib_samples_)
 					for (auto &[c, p] : s)
@@ -456,12 +456,17 @@ namespace ips
 		std::lock_guard lk(m_);
 		int64_t now = steady_us();
 		// Frames per second from the recent arrival times (0 if nothing arrived in the last 2 s).
-		double fps = 0;
-		if (frame_times_.size() > 5)
+		double fps = 0; // frames per second over the last 2 seconds only (gaps between runs must not drag it down)
 		{
-			double span = (frame_times_.back() - frame_times_.front()) / 1e6;
-			if (span > 0 && now - frame_times_.back() < 2'000'000)
-				fps = (frame_times_.size() - 1) / span;
+			size_t n = 0;
+			int64_t oldest = now;
+			for (auto it = frame_times_.rbegin(); it != frame_times_.rend() && now - *it <= 2'000'000; ++it)
+			{
+				++n;
+				oldest = *it;
+			}
+			if (n >= 2 && frame_times_.back() > oldest)
+				fps = (n - 1) / ((frame_times_.back() - oldest) / 1e6);
 		}
 		// Helper: median and 95th percentile of a timing list.
 		auto stats = [&](const std::deque<double> &d)
@@ -498,6 +503,12 @@ namespace ips
 				{"blob_base", blobs_->base_uri()}};
 	}
 
+	// Count a message the server could not understand (shown as "bad_messages" on the status page).
+	void Hub::note_bad_message()
+	{
+		std::lock_guard lk(m_);
+		++bad_;
+	}
 	// The configured apps as JSON (used by the launcher page).
 	json Hub::apps_json() const
 	{

@@ -385,11 +385,11 @@ TEST(edge_zoom_maps_to_in_and_out) {
 TEST(edge_cursor_uses_the_calibration) {
 	Mapper m(1000, 500);
 	Homography h;
-	h.h = {2, 0, 0, 0, 2, 0, 0, 0, 1};  // a made-up calibration that doubles every coordinate
+	h.h = {2, 0, 0, 0, 2, 0, 0, 0, 1};  // a made-up calibration that doubles every coordinate (as fractions of the screen)
 	m.set(0, h);
 	EdgeAdapter a(0);
 	auto g = a.update(motion_of({m_hand(1, 0.25, 0.25)}), m, 0, 1000);
-	CHECK(g.size() == 1 && std::fabs(g[0].x - 0.5) < 1e-9 && std::fabs(g[0].y - 0.5) < 1e-9);
+	CHECK(g.size() == 1 && std::fabs(g[0].x - 500) < 1e-9 && std::fabs(g[0].y - 250) < 1e-9);  // doubled (0.5) as a fraction of a 1000x500 screen
 	auto other = a.update(motion_of({m_hand(1, 0.25, 0.25)}), m, 1, 2000);  // camera 1 is uncalibrated: plain scaling
 	CHECK(other.size() == 1 && std::fabs(other[0].x - 250) < 1e-6);
 }
@@ -591,6 +591,60 @@ TEST(gesture_source_setting_is_read_from_the_config_file) {
 	CHECK(load("{\"gesture_source\": \"bogus\"}") == "hub");           // invalid value: safe default
 	CHECK(load("// a comment\n{\"gesture_source\": \"edge\" /* inline */}") == "edge");  // comments are allowed
 	fs::remove_all(dir, ec);
+}
+// ---- calibration must not depend on the display size at the moment it was made ------------------------------------
+
+TEST(calibrated_mapping_scales_with_the_display_size) {
+	Mapper m(1000, 500);
+	Homography identity;  // camera (0..1) -> fraction of the screen (0..1)
+	m.set(0, identity);
+	Vec2 a = m.to_px(0, {0.25, 0.5});
+	CHECK(std::fabs(a.x - 250) < 1e-9 && std::fabs(a.y - 250) < 1e-9);
+	m.set_screen(2000, 1000);  // the display window changes size AFTER calibration (e.g. kiosk instead of a window)
+	Vec2 b = m.to_px(0, {0.25, 0.5});
+	CHECK(std::fabs(b.x - 500) < 1e-9 && std::fabs(b.y - 500) < 1e-9);  // still the same spot on the picture
+}
+
+TEST(saved_calibration_round_trips_and_is_marked_as_fractions) {
+	Mapper m(1000, 500);
+	Homography h;
+	h.h = {1.5, 0, -0.1, 0, 1.5, -0.1, 0, 0, 1};
+	m.set(0, h);
+	json saved = m.to_json();
+	CHECK(saved["normalized"] == true);
+	Mapper loaded(1000, 500);
+	loaded.from_json(saved);
+	CHECK(loaded.calibrated(0));
+	Vec2 a = m.to_px(0, {0.4, 0.4}), b = loaded.to_px(0, {0.4, 0.4});
+	CHECK(std::fabs(a.x - b.x) < 1e-9 && std::fabs(a.y - b.y) < 1e-9);
+}
+
+TEST(old_pixel_calibration_files_are_ignored_instead_of_misused) {
+	json old = {{"screen", {1000, 500}}, {"cams", {{"0", {2000, 0, 0, 0, 1000, 0, 0, 0, 1}}}}};  // no "normalized" key
+	Mapper m(1000, 500);
+	m.from_json(old);
+	CHECK(!m.calibrated(0));
+}
+
+TEST(calibration_made_at_one_display_size_still_fits_after_a_resize) {
+	HubFixture f("edge");
+	f.hub->calibrate_start();
+	const double xs[4] = {0.2, 0.8, 0.8, 0.2}, ys[4] = {0.2, 0.2, 0.8, 0.8};
+	for (int i = 0; i < 4; ++i) {
+		Hand h = pose_hand(false, xs[i], ys[i], .95f);
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_START")})));
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_END")})));
+	}
+	CHECK(f.hub->status()["cameras"]["0"]["calibrated"] == true);
+	f.actions.clear();
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)})));
+	const json *before = f.first("move");
+	CHECK(before && std::abs((*before)["x"].get<int>() - 500) <= 12);   // middle of a 1000 px wide screen
+	f.hub->set_display_size(2000, 1000);                                  // the page was reloaded at another size
+	f.actions.clear();
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)})));
+	const json *after = f.first("move");
+	CHECK(after && std::abs((*after)["x"].get<int>() - 1000) <= 25);    // the same camera spot is still the middle, now of a 2000 px wide screen
 }
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);

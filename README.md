@@ -85,6 +85,11 @@ live data, so the choice can be made from evidence. Johnny's original app is kep
 [edge/pi_hand_tracking_v2/](edge/pi_hand_tracking_v2/) (its own instructions are in its README); the agent uses his
 motion engine and his latest-frame camera class from there without modifying them.
 
+## Security in one paragraph
+
+The hub listens on **this computer only** by default. If a separate Pi has to reach a hub on a laptop, set `"bind": "0.0.0.0"` in `config.json`
+and an `IPS_TOKEN` in `.env`; see [docs/RUNBOOK.md](docs/RUNBOOK.md) ("Who can reach the hub"). Keep your AI key only in `.env` (git-ignored).
+
 ## Tests
 
 ```bash

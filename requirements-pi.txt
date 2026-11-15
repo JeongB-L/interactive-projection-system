@@ -1,4 +1,4 @@
 # Only needed on the Raspberry Pi (or any machine using real cameras). The hub and simulator need no pip packages.
 opencv-python-headless
-mediapipe
+mediapipe>=0.10.31,<1.3
 pyautogui

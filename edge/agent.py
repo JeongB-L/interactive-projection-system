@@ -230,6 +230,10 @@ class OsPointer:
             self.g.press({"left": "left", "right": "right", "up": "up", "down": "down"}[a["detail"]])
 
 
+# If a camera delivers no frame for this many seconds, the agent says so (instead of waiting silently).
+STALL_WARN_SECONDS = 5.0
+
+
 # ---------------------------------------------------------------- hand messages
 # Build the JSON message for one camera frame (the "hands" message the hub receives).
 def hands_message(cam, seq, ts, track_ms, hands, motion=None):
@@ -351,6 +355,11 @@ class HandTracker:
             self.task.close()
 
 
+# The camera index for the i-th camera in the list (used in messages).
+def cam_index(args, i):
+    return args.cam_list[i] if i < len(args.cam_list) else i
+
+
 # Prints one progress line every 5 seconds: frames per second, share of frames with a hand, tracking time.
 class Progress:
     def __init__(self):
@@ -441,12 +450,20 @@ def run_camera(link, args):
         last_seq = [0] * len(cams)
         t_end = time.time() + args.seconds if args.seconds else None
         progress = Progress()
+        last_frame_at = [time.monotonic()] * len(cams)
+        warned_at = [0.0] * len(cams)
         while link.alive and (t_end is None or time.time() < t_end):
             for i, cam in enumerate(cams):
                 # Wait briefly for this camera's newest frame (None = nothing new yet).
                 newest = cam.newest(last_seq[i], timeout=0.2 if len(cams) > 1 else 2.0)
                 if newest is None:
+                    # No frame: warn (at most every STALL_WARN_SECONDS) once the camera has been silent that long.
+                    quiet = time.monotonic() - last_frame_at[i]
+                    if quiet >= STALL_WARN_SECONDS and time.monotonic() - warned_at[i] >= STALL_WARN_SECONDS:
+                        print("agent: camera %d has delivered no frames for %.0f s (cable? another program using it?)" % (cam_index(args, i), quiet), flush=True)
+                        warned_at[i] = time.monotonic()
                     continue
+                last_frame_at[i] = time.monotonic()
                 bgr, frame_t, cam_seq = newest
                 last_seq[i] = cam_seq
                 if args.mirror:
