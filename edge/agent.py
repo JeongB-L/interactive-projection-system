@@ -309,6 +309,73 @@ class HandTracker:
             self.task.close()
 
 
+# Prints one progress line every 5 seconds: frames per second, share of frames with a hand, tracking time.
+class Progress:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.frames = self.hands = 0
+        self.ms = 0.0
+        self.t = time.time()
+
+    # Count one processed frame, and print + restart if 5 seconds have passed.
+    def add(self, has_hand, track_ms):
+        self.frames += 1
+        self.hands += 1 if has_hand else 0
+        self.ms += track_ms
+        span = time.time() - self.t
+        if span >= 5:
+            print("agent: %.1f frames/s, hand seen in %d%% of frames, tracking %.1f ms/frame"
+                  % (self.frames / span, 100 * self.hands // self.frames, self.ms / self.frames), flush=True)
+            self.reset()
+
+
+# Video / photo source: runs the REAL hand tracker on a video file (or one photo, repeated) instead of a
+# live camera. Lets the whole pipeline be tested when nobody can stand in front of the camera.
+def run_video(link, args):
+    import cv2
+    if not args.video or not os.path.exists(args.video):
+        raise SystemExit("--source video needs --video <video or photo file> that exists")
+    is_image = args.video.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
+    cap = None if is_image else cv2.VideoCapture(args.video)
+    still = cv2.imread(args.video) if is_image else None
+    if is_image and still is None:
+        raise SystemExit("cannot read image " + args.video)
+    tracker = HandTracker(args.model)
+    progress = Progress()
+    seq = 0
+    t_end = time.time() + args.seconds if args.seconds else None
+    next_t = time.time()
+    try:
+        while link.alive and (t_end is None or time.time() < t_end):
+            # Next frame: the photo again, or the next video frame (restarting the video at its end).
+            if is_image:
+                bgr = still
+            else:
+                ok, bgr = cap.read()
+                if not ok:
+                    if cap.get(cv2.CAP_PROP_POS_FRAMES) == 0:
+                        raise SystemExit("cannot read video " + args.video)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            ts = int(time.time() * 1e6)
+            t0 = time.perf_counter()
+            hands = tracker.process(rgb)
+            track_ms = (time.perf_counter() - t0) * 1000
+            link.send({"t": "hands", "cam": 0, "seq": seq, "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
+            seq += 1
+            progress.add(bool(hands), track_ms)
+            # Keep the chosen frame rate (never sleep a negative time if tracking is slower than that).
+            next_t += 1.0 / args.fps
+            time.sleep(max(0.0, next_t - time.time()))
+    finally:
+        tracker.close()
+        if cap:
+            cap.release()
+
+
 # Real-camera source: grab frames, run MediaPipe hand tracking, send the landmarks (and optionally JPEGs).
 def run_camera(link, args):
     import cv2
@@ -329,10 +396,7 @@ def run_camera(link, args):
     trackers = [HandTracker(args.model) for _ in cams]
     seq = [0] * len(cams)
     t_end = time.time() + args.seconds if args.seconds else None
-    # Progress line every 5 seconds: frames per second, how many frames contained a hand, tracking time.
-    n_frames = n_hands = 0
-    sum_ms = 0.0
-    t_report = time.time()
+    progress = Progress()
     try:
         while link.alive and (t_end is None or time.time() < t_end):
             for i, cam in enumerate(cams):
@@ -351,22 +415,12 @@ def run_camera(link, args):
                 track_ms = (time.perf_counter() - t0) * 1000
                 link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
                 seq[i] += 1
-                n_frames += 1
-                n_hands += 1 if hands else 0
-                sum_ms += track_ms
+                progress.add(bool(hands), track_ms)
                 # Optionally also send the camera image so the hub can store video.
                 if args.send_frames:
                     ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     if ok:
                         link.send_jpeg(i, jpg.tobytes())
-            # Print the progress line, then start counting again.
-            if time.time() - t_report >= 5:
-                span = time.time() - t_report
-                print("agent: %.1f frames/s, hand seen in %d%% of frames, tracking %.1f ms/frame"
-                      % (n_frames / span, 100 * n_hands // max(n_frames, 1), sum_ms / max(n_frames, 1)), flush=True)
-                n_frames = n_hands = 0
-                sum_ms = 0.0
-                t_report = time.time()
     finally:
         # Close the trackers cleanly (avoids a harmless but noisy error message at exit).
         for t in trackers:
@@ -378,7 +432,8 @@ def run_camera(link, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hub", default="127.0.0.1:8080")
-    ap.add_argument("--source", choices=["synthetic", "replay", "camera", "picamera"], default="synthetic")
+    ap.add_argument("--source", choices=["synthetic", "replay", "camera", "picamera", "video"], default="synthetic")
+    ap.add_argument("--video", help="for --source video: a video file or a photo of hands (real tracker, no live camera needed)")
     ap.add_argument("--cams", nargs="+", type=int, default=[0], help="camera indices; default one camera (0). e.g. 0 1 for two (synthetic: only the count matters)")
     ap.add_argument("--model", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "hand_landmarker.task"),
                     help="MediaPipe hand model file (downloaded by setup.sh --pi)")
@@ -391,7 +446,7 @@ def main():
     args = ap.parse_args()
     args.cam_list = args.cams
     # Map the chosen --source to the function that implements it.
-    runner = {"synthetic": run_synthetic, "replay": run_replay, "camera": run_camera, "picamera": run_camera}[args.source]
+    runner = {"synthetic": run_synthetic, "replay": run_replay, "camera": run_camera, "picamera": run_camera, "video": run_video}[args.source]
     # Connect and run; on connection failure wait 2 seconds and try again.
     while True:
         try:

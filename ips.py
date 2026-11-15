@@ -265,6 +265,8 @@ def cmd_pi_start(a):
                "--source", a.source, "--cams", *[str(c) for c in a.cams]]
         if a.os_pointer:
             cmd.append("--os-pointer")
+        if a.video:
+            cmd += ["--video", os.path.abspath(a.video)]
         pid = spawn(cmd, AGENT_LOG, AGENT_PID)
         print("camera agent started (pid %d): source %s, camera(s) %s  (log: %s)" % (pid, a.source, a.cams, AGENT_LOG))
     # 3. The projected page in a fullscreen browser on this machine's display (the projector).
@@ -432,7 +434,8 @@ def main():
     add("stop", cmd_stop)
     add("status", cmd_status, ("--json", dict(action="store_true")))
     add("sim", cmd_sim, ("--seconds", dict(type=float, default=0)), ("--cams", dict(type=int, default=1)))
-    pi_args = (("--source", dict(default="picamera", choices=["picamera", "camera", "synthetic"])),
+    pi_args = (("--source", dict(default="picamera", choices=["picamera", "camera", "synthetic", "video"])),
+               ("--video", dict(default="", help="video or photo file for --source video")),
                ("--cams", dict(type=int, nargs="+", default=[0])),
                ("--os-pointer", dict(action="store_true")))
     add("pi-start", cmd_pi_start, *pi_args, ("--no-kiosk", dict(action="store_true")))

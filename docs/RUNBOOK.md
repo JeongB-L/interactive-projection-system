@@ -63,6 +63,18 @@ What to check first on the real Pi (none of this has run on hardware yet):
 5. If `import picamera2, mediapipe` fails with a numpy error: `.venv/bin/pip install "numpy<2"`.
 6. Camera video fills disk fast (about 2 MB/s per camera); prefer an SSD over the SD card if you record video.
 
+## Testing with nobody in front of the camera
+
+Three ways to exercise the system when no one can stand at the camera (all on the Pi, from a terminal on its desktop):
+```bash
+python3 ips.py pi-start --source synthetic          # fake hands drive the real hub, display and apps
+python3 ips.py pi-start --source video --video data/hands.jpg   # the REAL tracker on a photo (or video) of hands
+.venv/bin/python edge/agent.py --source replay --replay <events.ndjson from a past session>   # replay real recorded landmarks
+```
+`--video` accepts a photo (repeated) or a video file (looped). Sample photo: `curl -fL -o data/hands.jpg https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/woman_hands.jpg`.
+To see what the camera sees remotely: `.venv/bin/python tools/camera_check.py` saves `data/camera_check.jpg` (open it on the Pi desktop).
+Whenever someone is at the camera, the hub records the hand data (`python3 ips.py assets`), and that recording can be replayed later without them.
+
 ## Real Pi (when hardware is ready)
 
 On the Pi: `python3 -m pip install opencv-python mediapipe` (and `picamera2` for the CSI cameras), then
