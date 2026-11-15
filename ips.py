@@ -275,12 +275,21 @@ def cmd_pi_start(a):
     pid = read_pid(KIOSK_PID)
     if pid and alive(pid):
         return print("kiosk browser already running (pid %d)" % pid)
-    browser = next((b for b in ("chromium-browser", "chromium", "google-chrome", "msedge") if shutil.which(b)), None)
-    if not browser:
-        return print("no Chromium found; open %s/ui/display.html fullscreen yourself" % BASE)
+    url = BASE + "/ui/display.html"
     profile = os.path.join(DATA, "kiosk-profile")  # separate profile so it never touches your normal browser
-    pid = spawn([browser, "--kiosk", "--noerrdialogs", "--disable-infobars", "--no-first-run",
-                 "--password-store=basic", "--user-data-dir=" + profile, BASE + "/ui/display.html"], KIOSK_LOG, KIOSK_PID)
+    # Chromium-family browsers and Firefox take different flags for "fullscreen, no toolbars".
+    chromium_flags = ["--kiosk", "--noerrdialogs", "--disable-infobars", "--no-first-run",
+                      "--password-store=basic", "--user-data-dir=" + profile]
+    firefox_flags = ["--kiosk", "--no-remote", "--profile", profile]
+    candidates = [(b, chromium_flags) for b in ("chromium-browser", "chromium", "google-chrome", "msedge")] + \
+                 [(b, firefox_flags) for b in ("firefox", "firefox-esr")]
+    found = next(((b, f) for b, f in candidates if shutil.which(b)), None)
+    if not found:
+        return print("no browser found (looked for chromium, google-chrome, firefox). Install one with "
+                     "`sudo apt install -y chromium`, or open %s fullscreen (F11) in any browser yourself." % url)
+    browser, flags = found
+    os.makedirs(profile, exist_ok=True)  # Firefox needs the profile folder to exist
+    pid = spawn([browser] + flags + [url], KIOSK_LOG, KIOSK_PID)
     print("kiosk browser started (pid %d). `python3 ips.py stop` ends everything." % pid)
 
 
