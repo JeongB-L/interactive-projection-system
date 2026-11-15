@@ -303,6 +303,11 @@ class HandTracker:
                               "pts": [[p.x, p.y, p.z] for p in lm.landmark]})
         return hands
 
+    # Release the model (called when the agent stops).
+    def close(self):
+        if self.task:
+            self.task.close()
+
 
 # Real-camera source: grab frames, run MediaPipe hand tracking, send the landmarks (and optionally JPEGs).
 def run_camera(link, args):
@@ -324,28 +329,48 @@ def run_camera(link, args):
     trackers = [HandTracker(args.model) for _ in cams]
     seq = [0] * len(cams)
     t_end = time.time() + args.seconds if args.seconds else None
-    while link.alive and (t_end is None or time.time() < t_end):
-        for i, cam in enumerate(cams):
-            # Get the frame as BGR (for JPEG encoding) and RGB (what MediaPipe expects).
-            if use_pi:
-                bgr = cam.capture_array()
-            else:
-                ok, bgr = cam.read()
-                if not ok:
-                    continue
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            ts = int(time.time() * 1e6)
-            t0 = time.perf_counter()
-            # Run hand tracking and time it: this 'track_ms' is what the benchmark compares.
-            hands = trackers[i].process(rgb)
-            track_ms = (time.perf_counter() - t0) * 1000
-            link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
-            seq[i] += 1
-            # Optionally also send the camera image so the hub can store video.
-            if args.send_frames:
-                ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if ok:
-                    link.send_jpeg(i, jpg.tobytes())
+    # Progress line every 5 seconds: frames per second, how many frames contained a hand, tracking time.
+    n_frames = n_hands = 0
+    sum_ms = 0.0
+    t_report = time.time()
+    try:
+        while link.alive and (t_end is None or time.time() < t_end):
+            for i, cam in enumerate(cams):
+                # Get the frame as BGR (for JPEG encoding) and RGB (what MediaPipe expects).
+                if use_pi:
+                    bgr = cam.capture_array()
+                else:
+                    ok, bgr = cam.read()
+                    if not ok:
+                        continue
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                ts = int(time.time() * 1e6)
+                t0 = time.perf_counter()
+                # Run hand tracking and time it: this 'track_ms' is what the benchmark compares.
+                hands = trackers[i].process(rgb)
+                track_ms = (time.perf_counter() - t0) * 1000
+                link.send({"t": "hands", "cam": i, "seq": seq[i], "ts": ts, "track_ms": round(track_ms, 2), "hands": hands})
+                seq[i] += 1
+                n_frames += 1
+                n_hands += 1 if hands else 0
+                sum_ms += track_ms
+                # Optionally also send the camera image so the hub can store video.
+                if args.send_frames:
+                    ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if ok:
+                        link.send_jpeg(i, jpg.tobytes())
+            # Print the progress line, then start counting again.
+            if time.time() - t_report >= 5:
+                span = time.time() - t_report
+                print("agent: %.1f frames/s, hand seen in %d%% of frames, tracking %.1f ms/frame"
+                      % (n_frames / span, 100 * n_hands // max(n_frames, 1), sum_ms / max(n_frames, 1)), flush=True)
+                n_frames = n_hands = 0
+                sum_ms = 0.0
+                t_report = time.time()
+    finally:
+        # Close the trackers cleanly (avoids a harmless but noisy error message at exit).
+        for t in trackers:
+            t.close()
 
 
 # ---------------------------------------------------------------- main
