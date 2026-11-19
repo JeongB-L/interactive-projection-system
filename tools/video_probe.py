@@ -67,7 +67,7 @@ def summarize(name, series):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap = argparse.ArgumentParser(description="Run the real hand tracker once over a video and report pinch measurements.")
     ap.add_argument("video")
     ap.add_argument("--model", default=os.path.join(ROOT, "models", "hand_landmarker.task"))
     ap.add_argument("--max-hands", type=int, default=2)
