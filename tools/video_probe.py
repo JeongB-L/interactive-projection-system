@@ -72,6 +72,9 @@ def main():
     ap.add_argument("--model", default=os.path.join(ROOT, "models", "hand_landmarker.task"))
     ap.add_argument("--max-hands", type=int, default=2)
     ap.add_argument("--csv", help="write one row per frame to this file")
+    ap.add_argument("--square", action="store_true",
+                    help="pad every frame with black bars to a square before tracking (MediaPipe warns that "
+                         "non-square pictures are only supported approximately)")
     args = ap.parse_args()
 
     import cv2
@@ -83,6 +86,11 @@ def main():
         sys.exit("cannot open " + args.video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # With --square the picture is centred on a black square, so x and y are fractions of the SAME length.
+    side = max(w, h)
+    pad_x, pad_y = (side - w) // 2, (side - h) // 2
+    if args.square:
+        w = h = side
     tracker = HandTracker(args.model, args.max_hands)
     raw_bridge, fixed_bridge = MotionBridge(args.max_hands), MotionBridge(args.max_hands)
     print("video %dx%d at %.1f fps; running the real hand tracker once over it..." % (w, h, fps))
@@ -94,6 +102,8 @@ def main():
         ok, bgr = cap.read()
         if not ok:
             break
+        if args.square:
+            bgr = cv2.copyMakeBorder(bgr, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_CONSTANT, value=(0, 0, 0))
         hands = tracker.process(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         t = frames / fps  # the video's own clock, so results do not depend on this computer's speed
         frames += 1
