@@ -20,7 +20,7 @@ If the project already has a working `.venv`, skip the install commands. For a f
 ```bash
 sudo apt update
 sudo apt install python3-picamera2 python3-opencv python3-venv
-cd ~/interactive_projection_system
+cd ~/interactive-projection-system
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install mediapipe
@@ -29,11 +29,10 @@ python -c 'import cv2, mediapipe; from picamera2 import Picamera2'
 
 ## Run the gesture test
 
-On the Raspberry Pi desktop, open a terminal and run the virtual touchscreen setup script from the Desktop with `sudo` before sending events to the device. Check that setup created `/dev/virtual_touchscreen`.
+On the Raspberry Pi desktop, open a terminal and make sure the virtual touchscreen is set up (kernel module loaded and `/dev/virtual_touchscreen` present). See [steps.md](steps.md) for the checks and setup commands. Stop the main pipeline first (`python3 ips.py stop`), because only one program can use the camera.
 
 ```bash
-cat /dev/virtual_touchscreen
-cd ~/home/username/interactive-projection-system
+cd ~/interactive-projection-system
 source .venv/bin/activate
 cd version1
 ```
@@ -47,7 +46,7 @@ python test.py
 **Print commands and send them to the virtual touchscreen**
 
 ```bash
-python test.py | tee /dev/virtual_touchscreen
+python test.py | sudo tee /dev/virtual_touchscreen
 ```
 
 The camera preview opens by default. Press **Q** or **Esc** in the preview, or **Ctrl+C** in the terminal, to stop. Use `--headless` for SSH and `--debug` to see the detected gesture, confidence, and touch state on standard error.
