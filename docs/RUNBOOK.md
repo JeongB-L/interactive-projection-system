@@ -34,7 +34,8 @@ python ips.py stop           # stops the simulator and the hub; the recording is
 |---|---|
 | `python ips.py launch snake` | switch app (`browser`, `ai`, `snake`, `launcher`, or any URL) |
 | `python ips.py home` | back to the launcher |
-| `python ips.py calibrate` | show 4 yellow markers; point at each and pinch. `calibrate reset` clears it |
+| `python ips.py calibrate auto` | **map the camera onto the projected surface** (wall, table...): the projector shows a marker pattern for a few seconds and the camera measures it. No hand needed. Prints the accuracy in projector pixels. See "Surface calibration" below |
+| `python ips.py calibrate` | older way: show 4 yellow markers, point at each and pinch. `calibrate reset` clears any calibration |
 | `python ips.py brightness 0.4` | dim the projected image (test tracking under less light) |
 | `python ips.py ai "explain pinch gestures"` | ask the AI through the hub |
 | `python ips.py sessions` | recorded sessions |
@@ -137,9 +138,38 @@ Use `--source camera` for USB webcams. `--send-frames` also uploads video (the h
 
 Everything is stored on this machine (`data/`): no account, no cloud bill. The database stores a key and a URI for each file, so storage *could* move later (any bucket, NAS or mounted drive), but a cloud store is **not built** and is not needed for testing. Cloud object storage such as AWS S3 is a paid service, so it is deliberately left out. If the team ever wants it: write one class implementing `IBlobStore` (`hub/src/storage.hpp`), copy the files, run `python ips.py migrate-uri <new base>`, set `blob_uri`.
 
+## Surface calibration
+
+Calibration teaches the hub where the projected picture is in the camera image, so a fingertip on the wall becomes
+a cursor at the matching spot of the picture. Redo it whenever the camera or the projector moves.
+
+```bash
+python3 ips.py pi-start          # hub + camera agent + display (if not already running)
+python3 ips.py calibrate auto    # ~3 s: pattern on the wall, then e.g.
+# camera 0: calibrated (good): 15/15 markers, error 1.6 px rms (3.2 px worst)
+```
+- **Needs**: the camera sees the whole projected picture (part of it is fine; more is better), nobody standing in the
+  way for those few seconds. Works from a distance as long as the picture fills at least ~25% of the camera's width.
+- **Quality**: `good` < ~9 px, `ok` < ~18 px, `poor` above that (at 1080p). A `poor` or failed fit usually means the
+  surface is not flat, or the lens bends straight lines near the image edges.
+- After calibration a fingertip beyond the picture's edge holds the cursor at that edge.
+- The mapping is only exact for a fingertip **on** the surface; a hand held in the air between camera and wall
+  lands slightly off (parallax). Mount the camera close to the projector for the smallest error.
+- `python3 ips.py status` and the `/status` page show the last result. The mapping is saved in `data/calibration.json`.
+
+Without a live camera (e.g. on a laptop, from a recording made on the Pi):
+```bash
+python3 ips.py calibrate pattern                       # show the pattern only
+rpicam-vid -t 3000 -o calib.h264 --width 640 --height 480   # record it (stop the agent first: one camera user at a time)
+python3 ips.py calibrate hide
+python3 tools/surface_calib.py fit calib.h264 --debug calib_debug.jpg      # check; add --apply to install it
+```
+The debug picture shows the markers found (green) and the projected screen's grid as the mapping sees it.
+
 ## Troubleshooting
 
 - **`hub did not come up`**: `python ips.py logs`. On Windows a wrong DLL on PATH shows as exit code 3221225785; `ips.py` already puts MSYS2 first.
 - **Port in use**: change `port` in `config.json` and `set IPS_URL=http://127.0.0.1:<port>`.
-- **Cursor stuck at wrong place after moving the projector**: `python ips.py calibrate`.
+- **Cursor stuck at wrong place after moving the projector or camera**: `python3 ips.py calibrate auto`.
+- **`calibrate auto` says "pattern not found"**: the camera does not see the projected picture (check with `calibrate pattern` and a photo), or the room is so bright the markers wash out.
 - **Browser app doesn't react to gestures**: external websites can't be driven from the display page; run the agent with `--os-pointer`.
