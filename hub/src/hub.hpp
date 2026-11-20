@@ -91,6 +91,7 @@ namespace ips
 		void broadcast(const json &j);						 // send a message to every display page
 		void send_edge(const json &j);						 // send a message to the Pi agent
 		void save_calibration();
+		void calib_record(const std::map<int, Vec2> &sample); // store one marker's fingertip; solve after the 4th
 		void content_locked(const std::string &url);		// switch app (caller already holds the lock)
 		static double pct(std::vector<double> v, double p); // percentile helper for latency stats
 
@@ -117,6 +118,7 @@ namespace ips
 		// calibration state: which marker we are on, and the fingertip samples collected so far
 		int calib_step_ = -1;							 // -1 = not calibrating
 		std::vector<std::map<int, Vec2>> calib_samples_; // per step: camera -> raw fingertip
+		CalibHold calib_hold_;							 // only a held, still pinch counts as a marker press
 
 		// metrics shown on the status page
 		int64_t started_us_ = steady_us();

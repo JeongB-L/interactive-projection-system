@@ -433,6 +433,8 @@ struct HubFixture {
 		c.gesture_source = source;
 		c.screen_w = 1000;
 		c.screen_h = 500;
+		c.gesture.calib_hold_ms = 60;  // short hold / gap so the calibration tests run quickly
+		c.gesture.calib_gap_ms = 100;
 		hub = std::make_unique<Hub>(c);
 		hub->add_display([this](const std::string &s) {
 			json j = json::parse(s);
@@ -559,15 +561,28 @@ TEST(edge_mode_still_provides_home_from_our_rules) {
 	CHECK(f.count("home") == 1);
 }
 
+// A deliberate calibration press with Johnny's engine: pinch, hold still past calib_hold_ms, release, then pause past calib_gap_ms.
+static void calib_press(HubFixture &f, double x, double y) {
+	Hand h = pose_hand(false, x, y, .95f);
+	f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, x, y)}, {m_event("PINCH_START")})));
+	auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(90);
+	while (std::chrono::steady_clock::now() < end) {
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, x, y)})));
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, x, y)}, {m_event("PINCH_END")})));
+	std::this_thread::sleep_for(std::chrono::milliseconds(120));
+}
+static bool calib_done(const HubFixture &f) {
+	for (auto &j : f.all) if (j.value("t", "") == "calib" && j.value("done", false)) return true;
+	return false;
+}
+
 TEST(calibration_works_with_pinches_from_the_edge_engine) {
 	HubFixture f("edge");
 	f.hub->calibrate_start();
 	const double xs[4] = {0.2, 0.8, 0.8, 0.2}, ys[4] = {0.2, 0.2, 0.8, 0.8};  // roughly where the four markers are
-	for (int i = 0; i < 4; ++i) {
-		Hand h = pose_hand(false, xs[i], ys[i], .95f);
-		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_START")})));
-		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_END")})));
-	}
+	for (int i = 0; i < 4; ++i) calib_press(f, xs[i], ys[i]);
 	CHECK(f.count("down") == 0);  // the pinches were consumed by calibration, not delivered as clicks
 	bool done = false;
 	for (auto &j : f.all) if (j.value("t", "") == "calib" && j.value("done", false)) done = j["cameras_calibrated"] == 1;
@@ -630,11 +645,7 @@ TEST(calibration_made_at_one_display_size_still_fits_after_a_resize) {
 	HubFixture f("edge");
 	f.hub->calibrate_start();
 	const double xs[4] = {0.2, 0.8, 0.8, 0.2}, ys[4] = {0.2, 0.2, 0.8, 0.8};
-	for (int i = 0; i < 4; ++i) {
-		Hand h = pose_hand(false, xs[i], ys[i], .95f);
-		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_START")})));
-		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, xs[i], ys[i])}, {m_event("PINCH_END")})));
-	}
+	for (int i = 0; i < 4; ++i) calib_press(f, xs[i], ys[i]);
 	CHECK(f.hub->status()["cameras"]["0"]["calibrated"] == true);
 	f.actions.clear();
 	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.5, 0.5, .95f)}, motion_of({m_hand(1, 0.5, 0.5)})));
@@ -646,6 +657,70 @@ TEST(calibration_made_at_one_display_size_still_fits_after_a_resize) {
 	const json *after = f.first("move");
 	CHECK(after && std::abs((*after)["x"].get<int>() - 1000) <= 25);    // the same camera spot is still the middle, now of a 2000 px wide screen
 }
+// ---- calibration: only a held, still pinch counts (stray pinches used to advance the markers) ----------------------
+
+TEST(calib_hold_ignores_a_quick_pinch) {
+	GestureConfig c;  // 500 ms hold
+	CalibHold ch(c);
+	std::map<int, Vec2> tips{{0, {0.2, 0.2}}}, s;
+	ch.on_down(0, tips);
+	CHECK(!ch.on_frame(100'000, tips, s));
+	ch.on_up();                                  // released after 0.1 s: a flicker, not a press
+	CHECK(!ch.on_frame(600'000, tips, s));
+}
+
+TEST(calib_hold_ignores_a_pinch_while_the_hand_moves) {
+	GestureConfig c;
+	CalibHold ch(c);
+	std::map<int, Vec2> s;
+	ch.on_down(0, {{0, {0.2, 0.2}}});
+	for (int i = 1; i <= 10; ++i)                // the hand sweeps across the view while pinched
+		CHECK(!ch.on_frame(i * 60'000, {{0, {0.2 + 0.03 * i, 0.2}}}, s));
+}
+
+TEST(calib_hold_accepts_a_held_still_pinch_and_averages_the_tip) {
+	GestureConfig c;
+	CalibHold ch(c);
+	std::map<int, Vec2> s;
+	ch.on_down(0, {{0, {0.20, 0.30}}});
+	bool ok = false;
+	for (int i = 0; i <= 20 && !ok; ++i)         // small jitter around (0.21, 0.30)
+		ok = ch.on_frame(i * 33'000, {{0, {i % 2 ? 0.22 : 0.20, 0.30}}}, s);
+	CHECK(ok);
+	CHECK(s.count(0) && std::fabs(s[0].x - 0.21) < 0.01 && std::fabs(s[0].y - 0.30) < 1e-9);
+}
+
+TEST(calib_hold_needs_a_release_and_a_pause_between_markers) {
+	GestureConfig c;  // 500 ms hold, 800 ms gap
+	CalibHold ch(c);
+	std::map<int, Vec2> tips{{0, {0.5, 0.5}}}, s;
+	ch.on_down(0, tips);
+	CHECK(ch.on_frame(500'000, tips, s));        // first marker accepted
+	ch.on_down(600'000, tips);                   // still pinched, no release: ignored
+	CHECK(!ch.on_frame(1'200'000, tips, s));
+	ch.on_up();
+	ch.on_down(1'000'000, tips);                 // released, but only 0.5 s after the last marker: ignored
+	CHECK(!ch.on_frame(1'600'000, tips, s));
+	ch.on_up();
+	ch.on_down(1'400'000, tips);                 // released and 0.9 s later: counts
+	CHECK(ch.on_frame(1'900'000, tips, s));
+}
+
+TEST(hub_calibration_ignores_stray_pinches) {
+	HubFixture f("edge");
+	f.hub->calibrate_start();
+	Hand h = pose_hand(false, 0.5, 0.5, .95f);
+	for (int i = 0; i < 6; ++i) {                // six instant pinch/release flickers
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_START")})));
+		f.hub->on_hands(hands_msg(0, {h}, motion_of({m_hand(1, 0.5, 0.5)}, {m_event("PINCH_END")})));
+	}
+	int steps = 0;
+	for (auto &j : f.all) if (j.value("t", "") == "calib" && j.contains("step")) steps = std::max(steps, j["step"].get<int>());
+	CHECK(steps == 0);                           // still on the first marker
+	CHECK(!calib_done(f));
+	CHECK(f.count("down") == 0 && f.count("up") == 0);  // and none of them became clicks
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   for (auto& t : tests()) {

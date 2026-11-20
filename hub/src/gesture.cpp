@@ -12,6 +12,7 @@
 #include "gesture.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace ips
@@ -31,6 +32,9 @@ namespace ips
 		c.beta = j.value("beta", c.beta);
 		c.home_hold_ms = j.value("home_hold_ms", c.home_hold_ms);
 		c.stale_ms = j.value("stale_ms", c.stale_ms);
+		c.calib_hold_ms = j.value("calib_hold_ms", c.calib_hold_ms);
+		c.calib_still = j.value("calib_still", c.calib_still);
+		c.calib_gap_ms = j.value("calib_gap_ms", c.calib_gap_ms);
 		return c;
 	}
 
@@ -228,6 +232,73 @@ namespace ips
 			if (t_us - s.t_us <= stale_us)
 				v.push_back({cam, s.norm_tip});
 		return v;
+	}
+
+	// ---- calibration hold ---------------------------------------------------------
+
+	void CalibHold::reset()
+	{
+		holding_ = false;
+		armed_ = true;
+		accepted_any_ = false;
+		anchor_.clear();
+		sum_.clear();
+	}
+
+	// A pinch started: begin a hold, unless the hand has not released since the last marker or it is too soon.
+	void CalibHold::on_down(int64_t t_us, const std::map<int, Vec2> &tips)
+	{
+		if (!armed_ || tips.empty() || (accepted_any_ && t_us - last_accept_ < gap_us_))
+			return;
+		holding_ = true;
+		start_ = t_us;
+		anchor_ = tips;
+		sum_.clear();
+	}
+
+	// The pinch ended: a hold in progress is cancelled (too short), and the next pinch may count.
+	void CalibHold::on_up()
+	{
+		holding_ = false;
+		armed_ = true;
+	}
+
+	// Called on every frame while calibrating. Cancels the hold if the hand vanished or the fingertip moved.
+	bool CalibHold::on_frame(int64_t t_us, const std::map<int, Vec2> &tips, std::map<int, Vec2> &sample)
+	{
+		if (!holding_)
+			return false;
+		if (tips.empty())
+		{
+			holding_ = false; // hand lost mid-hold
+			return false;
+		}
+		for (const auto &[cam, a] : anchor_)
+		{
+			auto it = tips.find(cam);
+			if (it != tips.end() && std::hypot(it->second.x - a.x, it->second.y - a.y) > still_)
+			{
+				holding_ = false; // fingertip moved: not a deliberate press on the marker
+				return false;
+			}
+		}
+		for (const auto &[cam, p] : tips)
+		{
+			auto &s = sum_[cam];
+			s.first.x += p.x;
+			s.first.y += p.y;
+			++s.second;
+		}
+		if (t_us - start_ < hold_us_)
+			return false;
+		sample.clear();
+		for (const auto &[cam, s] : sum_)
+			sample[cam] = {s.first.x / s.second, s.first.y / s.second};
+		holding_ = false;
+		armed_ = false; // the hand must release before the next marker
+		accepted_any_ = true;
+		last_accept_ = t_us;
+		return true;
 	}
 
 	// How many cameras have reported recently.

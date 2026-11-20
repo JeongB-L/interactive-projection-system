@@ -34,6 +34,9 @@ namespace ips
 		double beta = 0.02;							   // one-euro smoothing: higher = less lag during fast motion
 		int home_hold_ms = 1000;					   // how long an open palm must stay still to trigger "home"
 		int stale_ms = 150;							   // a camera silent for this long is ignored
+		int calib_hold_ms = 500;					   // calibration: a pinch must be held this long to count for a marker
+		double calib_still = 0.04;					   // calibration: max fingertip drift during that hold (fraction of the camera image)
+		int calib_gap_ms = 800;						   // calibration: minimum time between two accepted markers
 		static GestureConfig from_json(const json &j); // read overrides from config.json
 	};
 
@@ -109,6 +112,31 @@ namespace ips
 
 	private:
 		std::map<int, CamFeature> slots_; // camera index -> newest feature
+	};
+
+	// Calibration helper: decides when a pinch really means "my fingertip is on the marker now".
+	// A bare pinch-down is not enough (a hand entering the view can flicker into a pinch for a frame):
+	// the pinch must be HELD for calib_hold_ms with the fingertip STILL (within calib_still), the hand must
+	// have released since the previous marker, and calib_gap_ms must have passed. The sample is the
+	// fingertip averaged over the hold. Pure logic: time is passed in.
+	class CalibHold
+	{
+	public:
+		explicit CalibHold(const GestureConfig &c) : hold_us_(int64_t(c.calib_hold_ms) * 1000), gap_us_(int64_t(c.calib_gap_ms) * 1000), still_(c.calib_still) {}
+		void reset();															   // start of calibration: forget everything
+		void on_down(int64_t t_us, const std::map<int, Vec2> &tips);			   // pinch started (from whichever engine acts)
+		void on_up();															   // pinch released
+		bool on_frame(int64_t t_us, const std::map<int, Vec2> &tips, std::map<int, Vec2> &sample); // true = marker accepted, sample filled
+		bool holding() const { return holding_; }
+
+	private:
+		int64_t hold_us_, gap_us_;
+		double still_;
+		bool holding_ = false, armed_ = true;
+		int64_t start_ = 0, last_accept_ = 0;
+		bool accepted_any_ = false;
+		std::map<int, Vec2> anchor_;					 // fingertip per camera when the pinch started
+		std::map<int, std::pair<Vec2, int>> sum_;		 // running sum + count per camera over the hold
 	};
 
 	// ---- 3. gesture recognizer ----------------------------------------------------

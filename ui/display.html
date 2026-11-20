@@ -113,7 +113,7 @@ function onCalib(m) {
   if (m.done) { box.style.display = 'none'; toast(m.cameras_calibrated ? 'Calibrated ' + m.cameras_calibrated + ' camera(s)' : 'Calibration cleared'); return; }
   box.style.display = 'block';
   const mk = document.getElementById('marker'); mk.style.left = m.x + 'px'; mk.style.top = m.y + 'px';
-  document.getElementById('msg').textContent = 'Point at the yellow dot and pinch (' + (m.step + 1) + '/' + m.total + ')';
+  document.getElementById('msg').textContent = 'Put your fingertip on the yellow dot, then pinch and hold still for a moment (' + (m.step + 1) + '/' + m.total + ')';
 }
 
 // Open the WebSocket to the hub's /display path and react to each message; reconnect automatically if it drops.

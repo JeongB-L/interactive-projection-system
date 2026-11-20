@@ -66,7 +66,7 @@ namespace ips
 
 	// Set up storage and the mapper, load any saved calibration, and start on the launcher.
 	Hub::Hub(Config cfg)
-		: cfg_(cfg), mapper_(cfg.screen_w, cfg.screen_h), rec_(cfg.gesture, cfg.screen_w, cfg.screen_h)
+		: cfg_(cfg), mapper_(cfg.screen_w, cfg.screen_h), rec_(cfg.gesture, cfg.screen_w, cfg.screen_h), calib_hold_(cfg.gesture)
 	{
 		// The edge adapter uses the same cursor dead zone as our own recognizer.
 		edge_adapter_ = EdgeAdapter(cfg_.gesture.dead_zone_px);
@@ -245,6 +245,15 @@ namespace ips
 		}
 		for (const auto &g : gs)
 			handle_gesture(g, t0);
+		// While calibrating, a marker counts only once the pinch has been held still long enough.
+		if (calib_step_ >= 0)
+		{
+			std::map<int, Vec2> tips, sample;
+			for (const auto &[cam, p] : fuser_.tips(t0, stale))
+				tips[cam] = p;
+			if (calib_hold_.on_frame(t0, tips, sample))
+				calib_record(sample);
+		}
 
 		// Step 5: record the raw message for later replay.
 		if (recorder_)
@@ -263,63 +272,73 @@ namespace ips
 		}
 	}
 
+	// One marker accepted: store its fingertip sample; after the 4th, solve one homography per camera.
+	void Hub::calib_record(const std::map<int, Vec2> &sample)
+	{
+		calib_samples_.push_back(sample);
+		++calib_step_;
+		// The 4 marker positions as fractions of the screen: top-left, top-right, bottom-right, bottom-left.
+		const double ix[4] = {0.1, 0.9, 0.9, 0.1}, iy[4] = {0.1, 0.1, 0.9, 0.9};
+		if (calib_step_ >= 4)
+		{
+			// All four collected: solve one homography per camera that saw every marker.
+			std::array<Vec2, 4> dst;
+			for (int i = 0; i < 4; ++i)
+				dst[i] = {ix[i], iy[i]}; // fractions of the screen, so the calibration still fits if the display size changes
+			std::map<int, int> n;
+			for (auto &s : calib_samples_)
+				for (auto &[c, p] : s)
+					++n[c];
+			int solved = 0;
+			for (auto &[cam, cnt] : n)
+			{
+				if (cnt < 4)
+					continue; // this camera missed a marker: skip it
+				std::array<Vec2, 4> src;
+				bool ok = true;
+				for (int i = 0; i < 4; ++i)
+				{
+					auto it = calib_samples_[i].find(cam);
+					if (it == calib_samples_[i].end())
+					{
+						ok = false;
+						break;
+					}
+					src[i] = it->second;
+				}
+				Homography h;
+				if (ok && solve_homography(src, dst, h))
+				{
+					mapper_.set(cam, h);
+					++solved;
+				}
+			}
+			calib_step_ = -1;
+			save_calibration();
+			broadcast({{"t", "calib"}, {"done", true}, {"cameras_calibrated", solved}});
+		}
+		else
+		{
+			// More markers to go: show the next one.
+			broadcast({{"t", "calib"}, {"step", calib_step_}, {"total", 4}, {"x", ix[calib_step_] * mapper_.width()}, {"y", iy[calib_step_] * mapper_.height()}});
+		}
+	}
+
 	// Turn one gesture into its effect: a calibration step, or an action sent to the display (and Pi).
 	void Hub::handle_gesture(const Gesture &g, int64_t t_us)
 	{
-		// --- Calibration mode: pinches are consumed as "I am pointing at the marker now" ---------
-		if (calib_step_ >= 0 && g.kind == "down")
+		// --- Calibration mode: pinches are consumed (never clicks); CalibHold decides when one counts ---
+		if (calib_step_ >= 0 && (g.kind == "down" || g.kind == "up"))
 		{
-			// Record every fresh camera's raw fingertip position for this marker.
-			std::map<int, Vec2> sample;
-			for (const auto &[cam, p] : fuser_.tips(t_us, int64_t(cfg_.gesture.stale_ms) * 1000))
-				sample[cam] = p;
-			calib_samples_.push_back(sample);
-			++calib_step_;
-			// The 4 marker positions as fractions of the screen: top-left, top-right, bottom-right, bottom-left.
-			const double ix[4] = {0.1, 0.9, 0.9, 0.1}, iy[4] = {0.1, 0.1, 0.9, 0.9};
-			if (calib_step_ >= 4)
+			if (g.kind == "down")
 			{
-				// All four collected: solve one homography per camera that saw every marker.
-				std::array<Vec2, 4> dst;
-				for (int i = 0; i < 4; ++i)
-					dst[i] = {ix[i], iy[i]}; // fractions of the screen, so the calibration still fits if the display size changes
-				std::map<int, int> n;
-				for (auto &s : calib_samples_)
-					for (auto &[c, p] : s)
-						++n[c];
-				int solved = 0;
-				for (auto &[cam, cnt] : n)
-				{
-					if (cnt < 4)
-						continue; // this camera missed a marker: skip it
-					std::array<Vec2, 4> src;
-					bool ok = true;
-					for (int i = 0; i < 4; ++i)
-					{
-						auto it = calib_samples_[i].find(cam);
-						if (it == calib_samples_[i].end())
-						{
-							ok = false;
-							break;
-						}
-						src[i] = it->second;
-					}
-					Homography h;
-					if (ok && solve_homography(src, dst, h))
-					{
-						mapper_.set(cam, h);
-						++solved;
-					}
-				}
-				calib_step_ = -1;
-				save_calibration();
-				broadcast({{"t", "calib"}, {"done", true}, {"cameras_calibrated", solved}});
+				std::map<int, Vec2> tips;
+				for (const auto &[cam, p] : fuser_.tips(t_us, int64_t(cfg_.gesture.stale_ms) * 1000))
+					tips[cam] = p;
+				calib_hold_.on_down(t_us, tips);
 			}
 			else
-			{
-				// More markers to go: show the next one.
-				broadcast({{"t", "calib"}, {"step", calib_step_}, {"total", 4}, {"x", ix[calib_step_] * mapper_.width()}, {"y", iy[calib_step_] * mapper_.height()}});
-			}
+				calib_hold_.on_up();
 			return;
 		}
 
@@ -384,12 +403,13 @@ namespace ips
 
 	void Hub::home() { launch("launcher"); }
 
-	// Begin calibration: show the first marker; the next 4 pinches will be treated as calibration clicks.
+	// Begin calibration: show the first marker; the next 4 held, still pinches are the calibration presses.
 	void Hub::calibrate_start()
 	{
 		std::lock_guard lk(m_);
 		calib_step_ = 0;
 		calib_samples_.clear();
+		calib_hold_.reset();
 		broadcast({{"t", "calib"}, {"step", 0}, {"total", 4}, {"x", 0.1 * mapper_.width()}, {"y", 0.1 * mapper_.height()}});
 	}
 
