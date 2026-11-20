@@ -7,6 +7,8 @@
 #   the TRUE camera -> screen mapping, not just against itself:
 #     - the layout (markers on screen, square, separated, unique bits),
 #     - detection + fit accuracy, mirrored cameras, partly covered patterns, and clear failures,
+#     - a BRIGHT room (projector barely brighter than the lit, textured wall; auto-exposure drifting): the plain
+#       picture shows no readable marker, the pattern-minus-inverted-pattern difference image recovers them,
 #     - the agent-side AutoCalibrator from "pattern shown" to "result sent", including timeouts and two cameras,
 #     - the real agent loops (run_video, run_camera with --mirror) and its replies to the hub's requests.
 #   Skipped where OpenCV + numpy are not installed.
@@ -51,6 +53,17 @@ def camera_image(cover=None, seed=0, blank=False):
     img = cv2.GaussianBlur(img, (3, 3), 0)
     img = np.clip(img + rng.normal(0, 3, img.shape), 0, 255).astype(np.uint8)
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
+# A camera picture in a BRIGHT room: the wall is lit (level ~150, with a fixed plaster texture) and the projector adds
+# only `delta` levels where its picture is white. `invert`: the inverted-marker phase. `gain`: auto-exposure change.
+def bright_room_image(delta=14, invert=False, gain=1.0, seed=0):
+    rng = np.random.default_rng(seed)
+    texture = cv2.GaussianBlur(np.random.default_rng(42).normal(0, 12, (CH, CW)).astype(np.float32), (5, 5), 0)
+    screen = sc.render_pattern(sc.marker_layout(W, H), W, H, invert=invert)
+    proj = cv2.warpPerspective(screen, screen_to_camera(), (CW, CH), flags=cv2.INTER_AREA).astype(np.float32) / 255
+    img = (150 + texture + proj * delta) * gain + rng.normal(0, 2.5, (CH, CW))
+    return cv2.cvtColor(np.clip(img, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
 
 
 # The TRUE screen position (fractions) of a camera pixel, from the known warp.
@@ -172,6 +185,30 @@ class DetectAndFit(unittest.TestCase):
         self.assertLess(worst_error_px(res["h"]), 5)
 
 
+@unittest.skipUnless(helpers.HAVE_CV, "needs OpenCV + numpy")
+class BrightRoom(unittest.TestCase):
+    def averaged(self, invert, gain=1.0):
+        return np.mean([sc.to_gray(bright_room_image(invert=invert, gain=gain, seed=s)) for s in range(8)], axis=0)
+
+    def test_the_plain_picture_is_unreadable_in_a_bright_room(self):
+        self.assertLessEqual(len(sc.MarkerDetector().detect(bright_room_image())), 2)
+
+    def test_the_difference_image_recovers_the_markers_and_an_accurate_fit(self):
+        diff = sc.difference_image(self.averaged(False), self.averaged(True))
+        acc = sc.Accumulator()
+        acc.prefer(sc.MarkerDetector().detect(diff), set(range(15)))
+        res = acc.fit(sc.marker_layout(W, H), W, H)
+        self.assertTrue(res["ok"], res)
+        self.assertGreaterEqual(res["markers"], 13)
+        self.assertEqual("difference", res["method"])
+        self.assertLess(worst_error_px(res["h"]), 6)
+
+    def test_an_exposure_change_between_the_two_phases_is_compensated(self):
+        for gain in (0.85, 1.15):
+            diff = sc.difference_image(self.averaged(False), self.averaged(True, gain))
+            self.assertGreaterEqual(len(sc.MarkerDetector().detect(diff)), 12, "gain %.2f" % gain)
+
+
 class FakeClock:
     def __init__(self):
         self.t = 100.0
@@ -226,6 +263,18 @@ class AutoCalibratorFlow(unittest.TestCase):
         r = self.sent[-1]["results"][0]
         self.assertFalse(r["ok"])
         self.assertIn("not found", r["reason"])
+
+    def test_no_pattern_at_all_tries_both_phases_then_explains(self):
+        self.cal.start({"id": 3, "screen": [W, H]})
+        blank = camera_image(blank=True)
+        while self.cal.active and self.clock.t < 200:
+            self.clock.t += 0.1
+            self.cal.feed(0, blank)
+        self.assertTrue(any(m.get("invert") for m in self.sent), "the inverted phase was tried before giving up")
+        r = self.sent[-1]["results"][0]
+        self.assertFalse(r["ok"])
+        self.assertIn("covering it", r["reason"])
+        self.assertLess(self.clock.t, 104, "it gives up as soon as both phases are done, not at the timeout")
         self.assertFalse(self.cal.active)
 
     def test_cancel_stops_without_a_result(self):
@@ -234,6 +283,47 @@ class AutoCalibratorFlow(unittest.TestCase):
         self.clock.t += 2
         self.cal.feed(0, self.img)
         self.assertEqual(["calib_pattern"], [m["t"] for m in self.sent])
+
+    def test_a_dark_room_needs_no_inverted_phase(self):
+        self.cal.start({"id": 5, "screen": [W, H]})
+        self.clock.t += 1.5
+        for _ in range(4):
+            self.cal.feed(0, self.img)
+        self.assertFalse(any(m.get("invert") for m in self.sent))
+        self.assertEqual("plain", self.sent[-1]["results"][0]["method"])
+
+    def test_a_bright_room_is_calibrated_through_the_inverted_phase(self):
+        # The fake camera shows whichever pattern the agent last asked the display for, in a bright room.
+        def frame():
+            shown = [m for m in self.sent if m["t"] == "calib_pattern"][-1]
+            return bright_room_image(invert=shown.get("invert", False), gain=1.1 if shown.get("invert") else 1.0,
+                                     seed=int(self.clock.t * 1000) % 997)
+        self.cal.start({"id": 6, "screen": [W, H]})
+        for _ in range(40):
+            self.clock.t += 0.1
+            self.cal.feed(0, frame())
+            if not self.cal.active:
+                break
+        inverted = [m for m in self.sent if m["t"] == "calib_pattern" and m.get("invert")]
+        self.assertEqual(1, len(inverted), "the inverted pattern is shown once")
+        r = self.sent[-1]["results"][0]
+        self.assertTrue(r["ok"], r)
+        self.assertEqual("difference", r["method"])
+        self.assertLess(worst_error_px(r["h"]), 6)
+
+    def test_a_bright_room_with_a_mirrored_camera(self):
+        def frame():
+            shown = [m for m in self.sent if m["t"] == "calib_pattern"][-1]
+            return bright_room_image(invert=shown.get("invert", False), seed=int(self.clock.t * 1000) % 997)
+        self.cal.start({"id": 7, "screen": [W, H]})
+        for _ in range(40):
+            self.clock.t += 0.1
+            self.cal.feed(0, frame(), mirrored=True)
+            if not self.cal.active:
+                break
+        r = self.sent[-1]["results"][0]
+        self.assertTrue(r["ok"], r)
+        self.assertLess(worst_error_px(r["h"], mirrored=True), 6)
 
     def test_two_cameras_each_get_their_own_result(self):
         cal = sc.AutoCalibrator(self.sent.append, [0, 1], settle_s=0, want_frames=3, timeout_s=5, clock=self.clock)

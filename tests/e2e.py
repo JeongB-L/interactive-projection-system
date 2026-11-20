@@ -10,7 +10,8 @@
 #     3. "edge" with the agent's motion engine switched off: the hub falls back to its own rules
 #     4. recording + replay    : a recorded session replayed into a fresh hub gives the SAME engine results
 #   Plus "SurfaceCalibration": the automatic camera -> projected-surface calibration through the real hub and the
-#   real `ips.py calibrate auto` command (camera frames are synthetic pictures of the projected pattern).
+#   real `ips.py calibrate auto` command (camera frames are synthetic pictures of the projected pattern in a BRIGHT
+#   room, following what the display was told to show, so the pattern / inverted-pattern phases go end to end).
 #   Plus a "Hardening" group that attacks the hub: URLs that try to leave the web folder, sensitive calls from another
 #   machine, malformed messages, and a stuck display connection (each of these was a real bug found in review).
 #   Each scenario plays the scripted 12-second routine (2 clicks, a swipe, an open-palm hold, a two-hand zoom).
@@ -399,14 +400,19 @@ class SurfaceCalibration(unittest.TestCase):
                                          os_pointer=False)
             args.calib = sc.AutoCalibrator(lambda m: None, [0], settle_s=0.3, want_frames=5, timeout_s=10)
             link = agent.Link(args)
-            frame = pics.camera_image()
+            # The fake camera shows whatever pattern the display was last told to draw, in a bright room where the
+            # plain pattern is unreadable (only the pattern-minus-inverted-pattern difference works).
+            def frame():
+                shown = display.of("calib_pattern")
+                inverted = bool(shown and shown[-1].get("show") and shown[-1].get("invert"))
+                return pics.bright_room_image(invert=inverted, seed=random.randrange(1000))
             target = {"tip": None}  # where the fake fingertip is (normalized camera coordinates), None = no hand
             stop = threading.Event()
 
             def camera_loop():
                 rng, seq = random.Random(1), 0
                 while not stop.is_set():
-                    agent.feed_calibration(args, 0, frame, False)
+                    agent.feed_calibration(args, 0, frame(), False)
                     hands = []
                     if target["tip"]:
                         hands = [{"right": True, "score": 0.95,
@@ -421,12 +427,14 @@ class SurfaceCalibration(unittest.TestCase):
                 out = self.calibrate_cli()
                 self.assertEqual(0, out.returncode, out.stdout + out.stderr)
                 self.assertIn("camera 0: calibrated (good)", out.stdout)
+                self.assertIn("room light cancelled out", out.stdout)
                 s = hub.status()
                 self.assertTrue(s["cameras"]["0"]["calibrated"])
                 self.assertTrue(os.path.exists(os.path.join(hub.dir, "calibration.json")))
                 # The display was shown the pattern, then it was taken down and a result announced.
                 shown = [m for m in display.of("calib_pattern") if m.get("show")]
                 self.assertEqual(15, len(shown[0]["markers"]))
+                self.assertEqual([False, True], [m["invert"] for m in shown])  # normal, then inverted
                 self.assertFalse(display.of("calib_pattern")[-1]["show"])
                 self.assertEqual(1, display.of("calib")[-1]["cameras_calibrated"])
                 # Now point at a spot on the surface: the cursor must land where that spot is on the PROJECTED picture.

@@ -415,6 +415,16 @@ namespace ips
 	void Hub::calibrate_start()
 	{
 		std::lock_guard lk(m_);
+		// A running automatic calibration would cover the yellow dot with its pattern and later overwrite this
+		// calibration with its own result: stop it first.
+		if (auto_calib_active_)
+		{
+			send_edge({{"t", "calib_cancel"}, {"id", auto_calib_active_}});
+			auto_calib_last_ = {{"id", auto_calib_active_}, {"ok", false}, {"cameras_calibrated", 0},
+								{"error", "replaced by the pinch calibration"}, {"results", json::array()}};
+			auto_calib_active_ = 0;
+			broadcast({{"t", "calib_pattern"}, {"show", false}});
+		}
 		calib_step_ = 0;
 		calib_samples_.clear();
 		calib_hold_.reset();
@@ -536,6 +546,7 @@ namespace ips
 		}
 		out["grid"] = grid;
 		out["markers"] = ms;
+		out["invert"] = msg.contains("invert") && msg["invert"].is_boolean() && msg["invert"].get<bool>(); // inverted-marker phase
 		return true;
 	}
 
@@ -597,6 +608,8 @@ namespace ips
 						s[k] = r[k];
 				if (r.contains("quality") && r["quality"].is_string())
 					s["quality"] = text_of(r, "quality", "", 20);
+				if (r.contains("method") && r["method"].is_string())
+					s["method"] = text_of(r, "method", "", 20); // "difference" = the room light was cancelled out
 				if (!ok)
 					s["reason"] = text_of(r, "reason", "calibration failed");
 				summary.push_back(s);

@@ -129,6 +129,8 @@ function onCalib(m) {
 // Draw (or remove) the automatic-calibration pattern: a white screen with ArUco markers. Each marker is a grid x grid
 // block of squares: a black border plus the inner bits sent by the agent ('1' = white), at a position given as
 // fractions of the screen. Drawn at the device's real pixel resolution with sharp edges, so the camera sees clean corners.
+// m.invert: every marker cell in the opposite colour (background still white). The agent subtracts the two versions
+// so the markers can be read even with the room lights on.
 let patternTimer = null;
 function onPattern(m) {
   const cv = document.getElementById('pattern');
@@ -143,7 +145,8 @@ function onPattern(m) {
     const x0 = mk.x0 * W, y0 = mk.y0 * H, cw = (mk.x1 - mk.x0) * W / n, ch = (mk.y1 - mk.y0) * H / n;
     for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
       const inner = gx > 0 && gy > 0 && gx < n - 1 && gy < n - 1;
-      g.fillStyle = inner && mk.bits[(gy - 1) * (n - 2) + (gx - 1)] === '1' ? '#fff' : '#000';
+      const white = (inner && mk.bits[(gy - 1) * (n - 2) + (gx - 1)] === '1') !== !!m.invert;
+      g.fillStyle = white ? '#fff' : '#000';
       const xa = Math.round(x0 + gx * cw), xb = Math.round(x0 + (gx + 1) * cw);
       const ya = Math.round(y0 + gy * ch), yb = Math.round(y0 + (gy + 1) * ch);
       g.fillRect(xa, ya, xb - xa, yb - ya);

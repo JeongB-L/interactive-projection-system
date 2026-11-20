@@ -389,15 +389,17 @@ def calibrate_auto(timeout):
                  "Is the agent running with a camera or video source? See `python3 ips.py logs` and data/logs/agent.log" % timeout)
     for res in last.get("results", []):
         if res.get("ok"):
-            print("camera %d: calibrated (%s): %d/%d markers, error %.1f px rms (%.1f px worst)" % (
+            print("camera %d: calibrated (%s): %d/%d markers, error %.1f px rms (%.1f px worst)%s" % (
                 res["cam"], res.get("quality", "?"), res.get("markers", 0), res.get("of", 0),
-                res.get("rms_px", 0), res.get("max_px", 0)))
+                res.get("rms_px", 0), res.get("max_px", 0),
+                ", room light cancelled out" if res.get("method") == "difference" else ""))
             if res.get("quality") == "poor":
                 print("  the fit is usable but loose: is the surface flat? Is the whole picture in the camera's view?")
         else:
             print("camera %d: FAILED: %s" % (res.get("cam", -1), res.get("reason", "unknown")))
     if not last.get("ok"):
-        print("hints: the camera must see the projected picture; dim room light helps; check with "
+        print("hints: the camera must see the projected picture, with no window (e.g. a terminal) on top of the "
+              "projected page; dimming the room light helps; check with "
               "`python3 ips.py calibrate pattern` and a photo from the camera, then `calibrate hide`")
         sys.exit(1)
 

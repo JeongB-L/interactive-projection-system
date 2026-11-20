@@ -817,16 +817,46 @@ TEST(auto_calibration_pattern_is_relayed_cleaned_and_only_while_calibrating) {
 	CHECK(f.last("calib_pattern").is_null());
 }
 
+TEST(auto_calibration_inverted_phase_flag_reaches_the_display) {
+	AutoCalibFixture f;
+	int id = f.hub->calibrate_auto()["id"];
+	json m = pattern_msg(id);
+	m["invert"] = true;
+	f.hub->on_calib_pattern(m);
+	CHECK(f.last("calib_pattern")["invert"] == true);
+	m["invert"] = "yes please";  // not a boolean: treated as the normal pattern
+	f.hub->on_calib_pattern(m);
+	CHECK(f.last("calib_pattern")["invert"] == false);
+}
+
+TEST(starting_a_pinch_calibration_stops_a_running_automatic_one) {
+	AutoCalibFixture f;
+	int id = f.hub->calibrate_auto()["id"];
+	f.hub->on_calib_pattern(pattern_msg(id));
+	f.hub->calibrate_start();
+	CHECK(f.to_edge.back()["t"] == "calib_cancel" && f.to_edge.back()["id"] == id);
+	CHECK(f.last("calib_pattern")["show"] == false);  // the yellow dot is not hidden behind the pattern
+	json s = f.hub->status();
+	CHECK(s["auto_calib"]["active"] == 0);
+	CHECK(s["calibrating_step"] == 0);
+	// A late answer from the agent must not overwrite the pinch calibration.
+	f.hub->on_calib_result({{"t", "calib_result"}, {"id", id},
+							{"results", json::array({{{"cam", 0}, {"ok", true}, {"h", zoom_h()}}})}});
+	CHECK(f.hub->status()["auto_calib"]["last"]["error"] == "replaced by the pinch calibration");
+	CHECK(f.hub->status()["calibrating_step"] == 0);
+}
+
 TEST(auto_calibration_result_is_installed_saved_and_used_for_the_cursor) {
 	AutoCalibFixture f;
 	int id = f.hub->calibrate_auto()["id"];
 	f.hub->on_calib_result({{"t", "calib_result"}, {"id", id},
 							{"results", json::array({{{"cam", 0}, {"ok", true}, {"h", zoom_h()}, {"rms_px", 2.5},
-													  {"quality", "good"}, {"markers", 15}, {"of", 15}}})}});
+													  {"quality", "good"}, {"markers", 15}, {"of", 15}, {"method", "difference"}}})}});
 	json s = f.hub->status();
 	CHECK(s["auto_calib"]["active"] == 0);
 	CHECK(s["auto_calib"]["last"]["ok"] == true && s["auto_calib"]["last"]["cameras_calibrated"] == 1);
 	CHECK(s["auto_calib"]["last"]["results"][0]["rms_px"] == 2.5);
+	CHECK(s["auto_calib"]["last"]["results"][0]["method"] == "difference");
 	CHECK(f.last("calib_pattern")["show"] == false);  // the pattern is taken down
 	CHECK(f.last("calib")["done"] == true && f.last("calib")["cameras_calibrated"] == 1);
 	CHECK(std::filesystem::exists(f.dir / "calib.json"));  // survives a restart

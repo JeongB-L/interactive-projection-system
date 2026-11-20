@@ -13,8 +13,15 @@
 #   Compared with pointing at 4 dots and pinching, this needs no hand, uses ~15x more points, rejects outliers,
 #   and reports its own accuracy (the RMS error in projector pixels).
 #
+#   Room light: in a lit room the projector's "black" is just the lit wall, so the markers can be too faint to read.
+#   The pattern is therefore shown twice: normal, then with every marker inverted (black <-> white, background
+#   unchanged). Subtracting the two averaged camera images cancels everything that did not change (room light, wall
+#   texture, anything else in view) and leaves only the markers, at double contrast. In a simulation built from a
+#   real photo of the team's wall this read 14-15/15 markers where the plain image read none.
+#
 #   Pieces:
 #     marker_layout()   where each marker goes on screen (fractions of the screen) + its black/white bits
+#     difference_image() pattern minus inverted pattern: the room-light-proof picture the markers are read from
 #     MarkerDetector    finds the markers in one camera image (OpenCV 4.7+ and 5.x, plus the older 4.x API)
 #     fit_homography()  robust camera -> screen fit and its error
 #     AutoCalibrator    the agent-side state machine: show pattern, collect frames, fit, report to the hub
@@ -87,16 +94,17 @@ def marker_bits(marker_id):
 
 
 # The message that tells the display page to show (or hide) the pattern: layout plus each marker's bits.
-def pattern_message(layout, show=True, request_id=0):
+# invert=True draws every marker cell in the opposite colour (the background stays white).
+def pattern_message(layout, show=True, request_id=0, invert=False):
     if not show:
         return {"t": "calib_pattern", "id": request_id, "show": False}
     markers = [dict(m, bits=marker_bits(m["id"])) for m in layout]
-    return {"t": "calib_pattern", "id": request_id, "show": True, "grid": GRID, "markers": markers}
+    return {"t": "calib_pattern", "id": request_id, "show": True, "invert": bool(invert), "grid": GRID, "markers": markers}
 
 
 # Draw the pattern into an image (white background, black markers), exactly as the display page does. Used by the
-# tests and the offline tool to make synthetic "projected" pictures.
-def render_pattern(layout, screen_w, screen_h):
+# tests and the offline tool to make synthetic "projected" pictures. invert=True: the inverted-marker version.
+def render_pattern(layout, screen_w, screen_h, invert=False):
     import numpy as np
     img = np.full((int(screen_h), int(screen_w)), 255, np.uint8)
     for m in layout:
@@ -106,11 +114,33 @@ def render_pattern(layout, screen_w, screen_h):
         for gy in range(GRID):
             for gx in range(GRID):
                 inner = 0 < gx < GRID - 1 and 0 < gy < GRID - 1
-                white = inner and bits[(gy - 1) * (GRID - 2) + (gx - 1)] == "1"
+                white = (inner and bits[(gy - 1) * (GRID - 2) + (gx - 1)] == "1") != bool(invert)
                 xa, xb = int(round(x0 + gx * mw)), int(round(x0 + (gx + 1) * mw))
                 ya, yb = int(round(y0 + gy * mh)), int(round(y0 + (gy + 1) * mh))
                 img[ya:yb, xa:xb] = 255 if white else 0
     return img
+
+
+# Grey, floating-point copy of a camera frame (for averaging frames of one phase).
+def to_gray(bgr):
+    import cv2
+    import numpy as np
+    g = bgr if bgr.ndim == 2 else cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    return g.astype(np.float32)
+
+
+# Normal pattern minus inverted pattern, from the AVERAGED camera images of each phase. Everything that is the same in
+# both (room light, wall texture, a lamp, the projector's own black level) cancels; the markers remain at double
+# contrast. The camera's auto-exposure may change a little between the phases (the inverted pattern is brighter), so
+# the inverted image is first scaled by the median brightness ratio of the two. Result: an 8-bit picture with the
+# unchanged background at mid-grey, the markers dark/light around it, ready for the normal marker detector.
+def difference_image(normal, inverse):
+    import numpy as np
+    usable = (normal > 15) & (inverse > 15) & (normal < 250) & (inverse < 250)  # skip clipped pixels
+    gain = float(np.median(normal[usable] / inverse[usable])) if usable.sum() > 100 else 1.0
+    d = normal - gain * inverse
+    spread = max(1.0, float(np.percentile(np.abs(d), 99)))
+    return np.clip(128 + d * (110.0 / spread), 0, 255).astype(np.uint8)
 
 
 # ---------------------------------------------------------------- detection
@@ -202,11 +232,14 @@ def apply_h(h, x, y):
 
 class Accumulator:
     """Collects marker detections over several frames and averages them (per-corner median), which removes most
-    of the frame-to-frame jitter of the corner positions."""
+    of the frame-to-frame jitter of the corner positions. Detections from the difference image (see
+    difference_image) can be added with prefer(); they come from an average of many frames already, are not
+    disturbed by room light, and are used instead of the per-frame median for the markers they contain."""
 
     def __init__(self):
         self.seen = {}  # marker id -> list of [[x, y] * 4]
         self.frames = 0  # frames that contributed (enough markers in view)
+        self.preferred = {}  # marker id -> [[x, y] * 4] from the difference image
 
     # Add one frame's detections; frames with too few markers (someone walking past, pattern not up yet) are skipped.
     def add(self, detections, known_ids):
@@ -218,6 +251,10 @@ class Accumulator:
         self.frames += 1
         return True
 
+    # Detections from the difference image (one averaged picture): used in preference to the per-frame median.
+    def prefer(self, detections, known_ids):
+        self.preferred = {i: c for i, c in detections.items() if i in known_ids}
+
     # Fit using the averaged corners. `layout` gives each marker's screen position.
     def fit(self, layout, screen_w, screen_h):
         import numpy as np
@@ -225,17 +262,16 @@ class Accumulator:
         cam, scr = [], []
         # A marker must have been seen in at least a third of the frames: one-off sightings are likely misreads.
         need = max(1, self.frames // 3)
-        used = 0
-        for i, sightings in self.seen.items():
-            if i not in by_id or len(sightings) < need:
-                continue
-            med = np.median(np.asarray(sightings, np.float64), axis=0)
-            cam.extend(med.tolist())
+        corners = {i: np.median(np.asarray(s, np.float64), axis=0).tolist()
+                   for i, s in self.seen.items() if i in by_id and len(s) >= need}
+        corners.update({i: c for i, c in self.preferred.items() if i in by_id})
+        for i in sorted(corners):
+            cam.extend(corners[i])
             scr.extend(screen_corners(by_id[i]))
-            used += 1
         res = fit_homography(cam, scr, screen_w, screen_h) if cam else {
             "ok": False, "points": 0, "reason": "no calibration markers seen: is the camera pointed at the projected picture?"}
-        res.update(markers=used, of=len(layout), frames=self.frames)
+        res.update(markers=len(corners), of=len(layout), frames=self.frames,
+                   method="difference" if self.preferred else "plain")
         return res
 
 
@@ -243,16 +279,19 @@ class Accumulator:
 class AutoCalibrator:
     """Runs inside the agent, which owns the camera(s). Flow:
         hub -> agent  {"t": "calib_capture", "id", "screen": [w, h]}   (start)
-        agent -> hub  {"t": "calib_pattern", "show": true, "markers": [...]}  (hub shows it on the display)
-        ... the agent's camera loop calls feed() with every frame ...
+        agent -> hub  {"t": "calib_pattern", "show": true, "invert": false, "markers": [...]}  (shown on the display)
+        ... the agent's camera loop calls feed() with every frame: phase 1 collects want_frames frames ...
+        agent -> hub  {"t": "calib_pattern", "show": true, "invert": true, ...}   (phase 2: inverted markers)
+        ... another want_frames frames; then each camera's two averaged images are subtracted ...
         agent -> hub  {"t": "calib_result", "id", "results": [{"cam", "ok", "h", "rms_px", ...}]}
+    If phase 1 alone already saw every marker in every frame (a dark room), phase 2 is skipped.
     start() is called from the connection's reader thread and feed() from the camera loop, hence the lock."""
 
     def __init__(self, send, cameras, settle_s=1.0, want_frames=8, timeout_s=12.0, clock=time.monotonic):
         self.send = send  # function(msg dict) that sends one message to the hub
         self.cameras = list(cameras)  # camera indices used in messages (0, 1, ...)
-        self.settle_s = settle_s  # wait this long after showing the pattern (display + camera exposure catch up)
-        self.want_frames = want_frames
+        self.settle_s = settle_s  # wait this long after each pattern change (display + camera exposure catch up)
+        self.want_frames = want_frames  # frames collected per phase
         self.timeout_s = timeout_s
         self.clock = clock
         self.lock = threading.Lock()
@@ -269,11 +308,14 @@ class AutoCalibrator:
         sw, sh = max(100, int(screen[0])), max(100, int(screen[1]))
         layout = marker_layout(sw, sh, int(msg.get("cols", DEFAULT_COLS)), int(msg.get("rows", DEFAULT_ROWS)))
         rid = int(msg.get("id", 0))
+        now = self.clock()
         with self.lock:
             if self.detector is None:
                 self.detector = MarkerDetector()
             self.req = {"id": rid, "w": sw, "h": sh, "layout": layout, "ids": {m["id"] for m in layout},
-                        "t0": self.clock(), "acc": {c: Accumulator() for c in self.cameras}, "done": {}}
+                        "t0": now, "phase": "normal", "phase_t0": now,
+                        "cams": {c: {"acc": Accumulator(), "sum": {}, "n": {"normal": 0, "inverse": 0}, "mirrored": False}
+                                 for c in self.cameras}}
         self.send(pattern_message(layout, True, rid))
         print("calibration %d: pattern shown, looking for %d markers" % (rid, len(layout)), flush=True)
 
@@ -294,31 +336,68 @@ class AutoCalibrator:
     def feed(self, cam, bgr, mirrored=False):
         if self.req is None:
             return
+        out = []  # messages to send once the lock is released
         with self.lock:
             r = self.req
             if r is None:
                 return
             now = self.clock()
-            if now - r["t0"] >= self.settle_s and cam in r["acc"] and cam not in r["done"]:
-                acc = r["acc"][cam]
-                acc.add(self.detector.detect(bgr, mirrored), r["ids"])
-                if acc.frames >= self.want_frames:
-                    r["done"][cam] = acc.fit(r["layout"], r["w"], r["h"])
+            phase = r["phase"]
+            st = r["cams"].get(cam)
+            if st is not None and now - r["phase_t0"] >= self.settle_s and st["n"][phase] < self.want_frames:
+                self._collect(r, st, phase, bgr, mirrored)
+            full = all(c["n"][phase] >= self.want_frames for c in r["cams"].values())
             timed_out = now - r["t0"] > self.timeout_s
-            if not (timed_out or len(r["done"]) == len(r["acc"])):
-                return
-            # Finished: cameras that never collected enough frames are fitted with what they have (or fail).
-            for c, acc in r["acc"].items():
-                if c not in r["done"]:
-                    res = acc.fit(r["layout"], r["w"], r["h"]) if acc.frames >= 3 else {
-                        "ok": False, "markers": len(acc.seen), "of": len(r["layout"]), "frames": acc.frames,
-                        "reason": "pattern not found in the camera image within %.0f s" % self.timeout_s}
-                    r["done"][c] = res
-            results = [dict(res, cam=c) for c, res in sorted(r["done"].items())]
-            self.req = None
-        self.send({"t": "calib_result", "id": r["id"], "screen": [r["w"], r["h"]], "results": results})
-        for res in results:
-            print("calibration %d cam %d: %s" % (r["id"], res["cam"], describe(res)), flush=True)
+            finish = timed_out
+            if phase == "normal" and not finish:
+                # A dark room: every marker was read in every frame already, so the inverted phase adds nothing.
+                clear = all(c["acc"].frames >= self.want_frames and len(c["acc"].seen) == len(r["layout"])
+                            for c in r["cams"].values())
+                if full and clear:
+                    finish = True
+                elif full or now - r["phase_t0"] > self.timeout_s / 2:  # (a silent camera must not block phase 2)
+                    r["phase"], r["phase_t0"] = "inverse", now
+                    out.append(pattern_message(r["layout"], True, r["id"], invert=True))
+            elif phase == "inverse" and full:
+                finish = True
+            if finish:
+                results = self._finish(r, timed_out)
+                self.req = None
+                out.append({"t": "calib_result", "id": r["id"], "screen": [r["w"], r["h"]], "results": results})
+        for m in out:
+            self.send(m)
+            if m["t"] == "calib_result":
+                for res in m["results"]:
+                    print("calibration %d cam %d: %s" % (m["id"], res["cam"], describe(res)), flush=True)
+
+    # Use one frame: add it to this phase's running sum (for the difference image) and, in the normal phase, read
+    # the markers directly too (enough on its own in a dark room).
+    def _collect(self, r, st, phase, bgr, mirrored):
+        g = to_gray(bgr)
+        prev = st["sum"].get(phase)
+        if prev is not None and prev.shape != g.shape:
+            return  # the camera changed size mid-calibration: ignore the odd frame
+        st["sum"][phase] = g if prev is None else prev + g
+        st["n"][phase] += 1
+        st["mirrored"] = mirrored
+        if phase == "normal":
+            st["acc"].add(self.detector.detect(bgr, mirrored), r["ids"])
+
+    # Fit every camera: the per-frame detections, improved by the difference image where both phases were seen.
+    def _finish(self, r, timed_out):
+        results = []
+        for c, st in sorted(r["cams"].items()):
+            n, s = st["n"], st["sum"]
+            if n["normal"] and n["inverse"] and s["normal"].shape == s["inverse"].shape:
+                diff = difference_image(s["normal"] / n["normal"], s["inverse"] / n["inverse"])
+                st["acc"].prefer(self.detector.detect(diff, st["mirrored"]), r["ids"])
+            res = st["acc"].fit(r["layout"], r["w"], r["h"])
+            if not res.get("ok") and not res.get("markers"):
+                res["reason"] = ("pattern not found in the camera image%s: is the camera pointed at the projected "
+                                 "picture, and is nothing (a window, a person) covering it?"
+                                 % (" within %.0f s" % self.timeout_s if timed_out else ""))
+            results.append(dict(res, cam=c))
+        return results
 
 
 # One human-readable line for a result.

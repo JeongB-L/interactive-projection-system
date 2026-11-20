@@ -50,14 +50,18 @@ The agent owns the camera, so it measures; the hub starts it, relays the pattern
 (code: `edge/surface_calib.py`, `Hub::calibrate_auto` / `on_calib_result`).
 ```json
 hub → agent  {"t":"calib_capture","id":3,"screen":[1920,1080]}
-agent → hub  {"t":"calib_pattern","id":3,"show":true,"grid":6,
+agent → hub  {"t":"calib_pattern","id":3,"show":true,"invert":false,"grid":6,
               "markers":[{"id":0,"x0":0.07,"y0":0.08,"x1":0.17,"y1":0.27,"bits":"1011000101100110"}, ...]}
 agent → hub  {"t":"calib_result","id":3,"screen":[1920,1080],
               "results":[{"cam":0,"ok":true,"h":[9 numbers],"rms_px":1.6,"max_px":3.2,"quality":"good",
                           "markers":15,"of":15,"frames":8,"inliers":60}]}
              (a failed camera: {"cam":1,"ok":false,"reason":"pattern not found in the camera image within 12 s"})
+agent → hub  the same calib_pattern with "invert":true    (second phase, skipped when the first read every marker)
 hub → agent  {"t":"calib_cancel","id":3}
 ```
+- Two phases: the normal pattern, then (unless the first phase already read every marker in every frame) the same
+  pattern with every marker cell inverted. The agent averages each phase's frames and subtracts them, which cancels
+  room light and wall texture; results carry `"method":"difference"` when that image was used, else `"plain"`.
 - Marker positions are fractions of the screen; corners in ArUco order (top-left, top-right, bottom-right, bottom-left).
   `bits` are the marker's inner 4x4 cells row by row (`1` = white), from OpenCV's `DICT_4X4_50`.
 - `h` maps a **normalized camera point** (same space as the hand landmarks, after `--mirror`) to a **fraction of the
@@ -73,7 +77,7 @@ hub → agent  {"t":"calib_cancel","id":3}
 {"t":"calib","step":0,"total":4,"x":192,"y":108}                 show a calibration marker
 {"t":"calib","done":true,"cameras_calibrated":2}
 {"t":"calib","done":true,"auto":true,"cameras_calibrated":0,"error":"..."}  automatic calibration failed
-{"t":"calib_pattern","show":true,"grid":6,"markers":[...]}           cover the screen with the marker pattern
+{"t":"calib_pattern","show":true,"invert":false,"grid":6,"markers":[...]}  cover the screen with the marker pattern
 {"t":"calib_pattern","show":false}
 {"t":"brightness","value":0.6}
 {"t":"hb"}                                                        heartbeat, every second

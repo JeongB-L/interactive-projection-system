@@ -6,8 +6,11 @@
 #   option (e.g. testing on a laptop with a video recorded on the Pi). Two commands:
 #
 #     pattern   show (or --hide) the calibration marker pattern on the projected display, through the hub
+#               (--invert: the inverted-marker version, for a bright room; see --inverse below)
 #     fit FILE  find the pattern in a photo or video of the projection, print the camera -> screen mapping and its
-#               accuracy, and with --apply install it in the running hub (camera --cam, default 0)
+#               accuracy, and with --apply install it in the running hub (camera --cam, default 0).
+#               In a bright room, also record the inverted pattern and pass it as --inverse FILE2: the two are
+#               subtracted, which cancels the room light (same method as `ips.py calibrate auto`).
 #
 #   The pattern's layout depends only on the display size, so `fit` must use the size the display had when the
 #   video was recorded (--screen WxH; default: what the running hub reports, else 1920x1080).
@@ -18,6 +21,7 @@
 #     rpicam-vid -t 3000 -o calib.h264 --width 640 --height 480
 #     python3 tools/surface_calib.py pattern --hide
 #     python3 tools/surface_calib.py fit calib.h264 --apply --debug calib_debug.jpg
+#   Bright room: also `pattern --invert`, record calib_inv.h264, then `fit calib.h264 --inverse calib_inv.h264 ...`
 # ---------------------------------------------------------------------------
 import argparse
 import os
@@ -45,13 +49,14 @@ def screen_size(text):
 # Show or hide the pattern on the projected display.
 def cmd_pattern(a):
     w, h = screen_size(a.screen)
-    msg = sc.pattern_message(sc.marker_layout(w, h), not a.hide)
+    msg = sc.pattern_message(sc.marker_layout(w, h), not a.hide, invert=a.invert)
     r = ips.api("/api/calibrate/pattern", msg)
     if r is None:
         sys.exit("the hub is not running (python3 ips.py start)")
     if not r.get("ok"):
         sys.exit("the hub refused the pattern: %s" % r.get("error"))
-    print("pattern hidden" if a.hide else "pattern shown for a %dx%d display (hide it with --hide)" % (w, h))
+    print("pattern hidden" if a.hide else "%spattern shown for a %dx%d display (hide it with --hide)"
+          % ("inverted " if a.invert else "", w, h))
 
 
 # Read up to `limit` frames from a photo or a video file.
@@ -109,8 +114,22 @@ def cmd_fit(a):
         acc.add(d, {m["id"] for m in layout})
         if len(d) >= len(best):
             best, best_frame = d, f
+    if a.inverse:
+        # Bright room: subtract the averaged recording of the inverted pattern (cancels the room light).
+        inv = frames_of(a.inverse, a.frames)
+        normal = sum(sc.to_gray(f) for f in frames) / len(frames)
+        inverse = sum(sc.to_gray(f) for f in inv) / len(inv)
+        if normal.shape != inverse.shape:
+            sys.exit("the two recordings have different sizes")
+        diff = sc.difference_image(normal, inverse)
+        found = det.detect(diff, a.mirror)
+        acc.prefer(found, {m["id"] for m in layout})
+        print("difference image: %d markers" % len(found))
+        if len(found) >= len(best):
+            import cv2
+            best, best_frame = found, cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
     res = acc.fit(layout, w, h)
-    print("%d frames read, %d with the pattern; display %dx%d" % (len(frames), acc.frames, w, h))
+    print("%d frames read, %d with the pattern readable directly; display %dx%d" % (len(frames), acc.frames, w, h))
     print(sc.describe(res))
     if a.debug:
         write_debug(a.debug, best_frame, best, res.get("h"), a.mirror)
@@ -131,6 +150,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pattern", help="show / hide the marker pattern on the display")
     p.add_argument("--hide", action="store_true")
+    p.add_argument("--invert", action="store_true", help="show the inverted-marker version (for --inverse)")
     p.add_argument("--screen", default="", help="display size WxH (default: what the hub reports)")
     p.set_defaults(fn=cmd_pattern)
     f = sub.add_parser("fit", help="calibrate from a photo or video of the projected pattern")
@@ -138,6 +158,7 @@ def main():
     f.add_argument("--screen", default="", help="display size WxH when the video was recorded (default: what the hub reports)")
     f.add_argument("--cam", type=int, default=0, help="camera index to install the mapping for (with --apply)")
     f.add_argument("--mirror", action="store_true", help="the agent runs with --mirror (flipped image)")
+    f.add_argument("--inverse", default="", help="photo/video of the INVERTED pattern (bright room: cancels room light)")
     f.add_argument("--frames", type=int, default=30, help="video frames to use")
     f.add_argument("--apply", action="store_true", help="install the result in the running hub")
     f.add_argument("--debug", default="", help="write a picture of what was found to this file")

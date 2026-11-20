@@ -149,7 +149,12 @@ python3 ips.py calibrate auto    # ~3 s: pattern on the wall, then e.g.
 # camera 0: calibrated (good): 15/15 markers, error 1.6 px rms (3.2 px worst)
 ```
 - **Needs**: the camera sees the whole projected picture (part of it is fine; more is better), nobody standing in the
-  way for those few seconds. Works from a distance as long as the picture fills at least ~25% of the camera's width.
+  way for those few seconds, and **no window on top of the projected page** (close the terminal: the pattern is drawn
+  by the page, so a window in front of it hides markers). Works from a distance as long as the picture fills at least
+  ~25% of the camera's width.
+- **Room light**: the room lights can stay on. The pattern is shown, then shown again with its markers inverted, and
+  the two camera images are subtracted, which cancels the room light (the result line then says "room light cancelled
+  out"). In a dark room the first pattern is already enough and it finishes sooner.
 - **Quality**: `good` < ~9 px, `ok` < ~18 px, `poor` above that (at 1080p). A `poor` or failed fit usually means the
   surface is not flat, or the lens bends straight lines near the image edges.
 - After calibration a fingertip beyond the picture's edge holds the cursor at that edge.
@@ -164,6 +169,8 @@ rpicam-vid -t 3000 -o calib.h264 --width 640 --height 480   # record it (stop th
 python3 ips.py calibrate hide
 python3 tools/surface_calib.py fit calib.h264 --debug calib_debug.jpg      # check; add --apply to install it
 ```
+In a bright room, also record the inverted pattern (`tools/surface_calib.py pattern --invert`, record `calib_inv.h264`)
+and add `--inverse calib_inv.h264` to `fit`.
 The debug picture shows the markers found (green) and the projected screen's grid as the mapping sees it.
 
 ## Troubleshooting
@@ -171,5 +178,5 @@ The debug picture shows the markers found (green) and the projected screen's gri
 - **`hub did not come up`**: `python ips.py logs`. On Windows a wrong DLL on PATH shows as exit code 3221225785; `ips.py` already puts MSYS2 first.
 - **Port in use**: change `port` in `config.json` and `set IPS_URL=http://127.0.0.1:<port>`.
 - **Cursor stuck at wrong place after moving the projector or camera**: `python3 ips.py calibrate auto`.
-- **`calibrate auto` says "pattern not found"**: the camera does not see the projected picture (check with `calibrate pattern` and a photo), or the room is so bright the markers wash out.
+- **`calibrate auto` says "pattern not found"**: the camera does not see the projected picture (check with `calibrate pattern` and a photo), or a window is on top of the projected page.
 - **Browser app doesn't react to gestures**: external websites can't be driven from the display page; run the agent with `--os-pointer`.
