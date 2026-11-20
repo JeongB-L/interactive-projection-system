@@ -443,7 +443,7 @@ def run_camera(link, args):
     trackers = []
     try:
         for idx in args.cam_list:
-            cams.append(Camera(backend, idx, 640, 480, int(args.fps), args.exposure_us, args.gain).start())
+            cams.append(Camera(backend, idx, args.width, args.height, int(args.fps), args.exposure_us, args.gain).start())
         # One tracker per camera, because each keeps its own tracking state between frames.
         trackers = [HandTracker(args.model, args.max_hands) for _ in cams]
         seq = [0] * len(cams)
@@ -516,6 +516,9 @@ def main():
     ap.add_argument("--model", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "hand_landmarker.task"),
                     help="MediaPipe hand model file (downloaded by setup.sh --pi)")
     ap.add_argument("--fps", type=float, default=30)
+    # 16:9 by default: the Pi Camera Module 3 sensor is 16:9, so a 4:3 size (e.g. 640x480) crops off its sides.
+    ap.add_argument("--width", type=int, default=848, help="camera capture width (camera sources)")
+    ap.add_argument("--height", type=int, default=480, help="camera capture height (camera sources)")
     ap.add_argument("--seconds", type=float, default=0, help="0 = run until stopped")
     ap.add_argument("--replay", help="events.ndjson recorded by the hub")
     ap.add_argument("--os-pointer", action="store_true", help="inject real OS mouse events (needs pyautogui)")

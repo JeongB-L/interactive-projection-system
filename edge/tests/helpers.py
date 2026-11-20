@@ -42,7 +42,7 @@ class FakeLink:
 
 # The command-line arguments the agent's source functions read, with safe defaults; override with keywords.
 def make_args(**kw):
-    d = dict(source="synthetic", cam_list=[0], fps=60.0, seconds=0.4, replay=None, video=None, model="unused",
+    d = dict(source="synthetic", cam_list=[0], fps=60.0, width=848, height=480, seconds=0.4, replay=None, video=None, model="unused",
              max_hands=1, mirror=False, exposure_us=None, gain=None, send_frames=False, two_hands=False, bridge=None)
     d.update(kw)
     return types.SimpleNamespace(**d)

@@ -178,8 +178,8 @@ class RunCamera(unittest.TestCase):
         self.assertEqual("opencv", FakeCamera.instances[0].args[0])
 
     def test_camera_settings_are_passed_to_johnnys_camera(self):
-        self.run_it(exposure_us=5000, gain=4.0, cam_list=[2])
-        self.assertEqual((2, 640, 480, 30, 5000, 4.0), FakeCamera.instances[0].args[1:])
+        self.run_it(exposure_us=5000, gain=4.0, cam_list=[2], width=1280, height=720)
+        self.assertEqual((2, 1280, 720, 30, 5000, 4.0), FakeCamera.instances[0].args[1:])
 
     def test_two_cameras_are_both_read(self):
         link, _ = self.run_it(cam_list=[0, 1])
