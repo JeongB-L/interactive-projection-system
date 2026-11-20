@@ -37,6 +37,8 @@ namespace ips
 		int calib_hold_ms = 500;					   // calibration: a pinch must be held this long to count for a marker
 		double calib_still = 0.04;					   // calibration: max fingertip drift during that hold (fraction of the camera image)
 		int calib_gap_ms = 800;						   // calibration: minimum time between two accepted markers
+		int click_rewind_ms = 150;					   // a click lands where the cursor was this long BEFORE the pinch was detected
+		double click_drag_px = 250;					   // while pinched the cursor is frozen; moving farther than this turns it into a drag
 		static GestureConfig from_json(const json &j); // read overrides from config.json
 	};
 
@@ -173,6 +175,27 @@ namespace ips
 		double mc_ = 1.0, beta_ = 0.02, dcut_ = 1.0, xp_ = 0, dxp_ = 0;
 		int64_t tp_ = 0;
 		bool init_ = false;
+	};
+
+	// Click steadier: fixes "pinch drift". Closing thumb and index finger pulls the fingertip (and so the cursor)
+	// away from the target just as the pinch is detected. So, for whichever engine produced the gestures:
+	//   - a press ("down") is moved back to where the cursor was click_rewind_ms earlier, before the fingers closed;
+	//   - while pinched, cursor moves are held back, so the press and the release land on the same spot (a click);
+	//   - moving farther than click_drag_px while pinched turns it into a drag (moves pass again, release where you are).
+	// Pure logic on gesture lists: time comes from the gestures themselves.
+	class ClickSteady
+	{
+	public:
+		explicit ClickSteady(const GestureConfig &c) : rewind_us_(int64_t(c.click_rewind_ms) * 1000), drag_px_(c.click_drag_px) {}
+		std::vector<Gesture> filter(const std::vector<Gesture> &in);
+		void reset();
+
+	private:
+		int64_t rewind_us_;
+		double drag_px_;
+		std::deque<std::pair<int64_t, Vec2>> hist_; // recent cursor positions (for the rewind)
+		bool pressed_ = false, dragging_ = false;
+		Vec2 press_{};
 	};
 
 	// DEFAULT EXAMPLE gesture detector. Feed it the fused hand each frame; it returns the gestures

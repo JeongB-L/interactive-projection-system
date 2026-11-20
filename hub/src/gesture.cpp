@@ -35,6 +35,8 @@ namespace ips
 		c.calib_hold_ms = j.value("calib_hold_ms", c.calib_hold_ms);
 		c.calib_still = j.value("calib_still", c.calib_still);
 		c.calib_gap_ms = j.value("calib_gap_ms", c.calib_gap_ms);
+		c.click_rewind_ms = j.value("click_rewind_ms", c.click_rewind_ms);
+		c.click_drag_px = j.value("click_drag_px", c.click_drag_px);
 		return c;
 	}
 
@@ -524,6 +526,70 @@ namespace ips
 		{
 			pinched_ = false;
 			emit("up", p);
+		}
+		return out;
+	}
+
+// ---- click steadier ------------------------------------------------------------
+
+	void ClickSteady::reset()
+	{
+		hist_.clear();
+		pressed_ = dragging_ = false;
+	}
+
+	std::vector<Gesture> ClickSteady::filter(const std::vector<Gesture> &in)
+	{
+		std::vector<Gesture> out;
+		for (Gesture g : in)
+		{
+			Vec2 p{g.x, g.y};
+			if (g.kind == "move")
+			{
+				hist_.push_back({g.t_us, p});
+				while (hist_.size() > 1 && g.t_us - hist_.front().first > rewind_us_ + 500'000)
+					hist_.pop_front();
+				if (pressed_ && !dragging_)
+				{
+					if (drag_px_ <= 0 || dist(p, press_) <= drag_px_)
+						continue; // hold the cursor still while pinched
+					dragging_ = true;
+				}
+				out.push_back(g);
+			}
+			else if (g.kind == "down")
+			{
+				// Newest remembered position at least rewind_us_ old; if the hand only just appeared, the oldest one.
+				if (rewind_us_ > 0 && !hist_.empty())
+				{
+					Vec2 r = hist_.front().second;
+					for (const auto &h : hist_)
+						if (h.first <= g.t_us - rewind_us_)
+							r = h.second;
+					g.x = r.x;
+					g.y = r.y;
+				}
+				pressed_ = true;
+				dragging_ = false;
+				press_ = {g.x, g.y};
+				out.push_back(g);
+			}
+			else if (g.kind == "up")
+			{
+				if (pressed_ && !dragging_)
+				{
+					g.x = press_.x;
+					g.y = press_.y;
+				}
+				pressed_ = dragging_ = false;
+				out.push_back(g);
+			}
+			else
+			{
+				if (g.kind == "hide")
+					reset();
+				out.push_back(g);
+			}
 		}
 		return out;
 	}

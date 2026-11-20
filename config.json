@@ -16,7 +16,7 @@
   "calib_path": "data/calibration.json",
   // Who decides gestures: "hub" = our C++ rules (default); "edge" = Johnny's motion engine running on the Pi
   // (adds two-hand zoom; our rules still provide the "home" gesture). The status page compares both either way.
-  "gesture_source": "hub",
+  "gesture_source": "edge",
   // What to record. Hand landmarks are small; camera video (frames) is large and private, so it is OFF by default.
   "record": { "landmarks": true, "frames": false },
   // Gesture detection tuning (used by the default rule-based recognizer):
@@ -38,7 +38,14 @@
     // Hold an open palm still this long to go back to the launcher.
     "home_hold_ms": 1000,
     // A camera that has been silent this long is ignored (so a frozen camera cannot move the cursor).
-    "stale_ms": 150
+    "stale_ms": 150,
+    // Pinch-drift fix: a click lands where the cursor was this long before the pinch was detected
+    // (closing the fingers pulls the fingertip off the target). 0 turns the rewind off.
+    "click_rewind_ms": 150,
+    // While pinched the cursor stays still; moving farther than this (pixels) turns the pinch into a drag.
+    // 0 = never drag: a pinch is always a click. Measured on the wall: the tracked fingertip jumps ~250 px
+    // as the fingers close and drifts 100-200 px more while held, so any drag threshold misfires.
+    "click_drag_px": 0
   },
   // Apps shown in the launcher. 'url' may be a page served by the hub (/apps/...) or any web address.
   "apps": [

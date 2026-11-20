@@ -37,6 +37,11 @@ WHAT THIS FILE DOES
   /* Short messages at the bottom of the screen, e.g. 'Swipe left'. */
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111; color: #fff; padding: 8px 16px;
            border-radius: 8px; font-size: 16px; display: none; z-index: 30; }
+  /* Home button, bottom center (but not at the very edge, where tracking is weakest) over every app except the launcher.
+     Pinch on it (or click) to go back to the launcher. */
+  #home { position: fixed; left: 50%; bottom: 12%; transform: translateX(-50%); z-index: 12; display: none; padding: 14px 26px; font-size: 26px; font-weight: 600;
+          color: #fff; background: rgba(17,24,39,.85); border: 3px solid #fff; border-radius: 14px; cursor: pointer; user-select: none; }
+  #home.hover { background: #2563eb; }
   /* Small badge showing the connection status to the hub. */
   #conn { position: fixed; right: 8px; top: 8px; font-size: 12px; color: #fff; background: #b91c1c; padding: 2px 8px; border-radius: 6px; z-index: 30; }
   #conn.ok { background: #15803d; }
@@ -48,6 +53,7 @@ WHAT THIS FILE DOES
 <!-- Calibration overlay (hidden until the hub starts calibration), cursor, dimmer, message toast, connection badge. -->
 <div id="calib"><div id="marker"></div><div id="msg"></div></div>
 <canvas id="pattern"></canvas>
+<div id="home">&#8962; Home</div>
 <div id="cursor"></div>
 <div id="dim"></div>
 <div id="toast"></div>
@@ -57,6 +63,17 @@ WHAT THIS FILE DOES
 const frame = document.getElementById('app'), cursor = document.getElementById('cursor');
 const toastEl = document.getElementById('toast'), conn = document.getElementById('conn');
 let lastDown = null, toastTimer = null;
+const homeBtn = document.getElementById('home');
+// The Home button: is the point (x, y) on it, and go home (the hub switches back to the launcher).
+function onHome(x, y) {
+  if (homeBtn.style.display === 'none') return false;
+  const r = homeBtn.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+}
+function goHome() { fetch('/api/home', { method: 'POST', body: '{}' }).catch(() => {}); }
+homeBtn.addEventListener('click', goHome);
+// Show the Home button only when an app other than the launcher is loaded.
+function showHome(url) { homeBtn.style.display = /launcher\.html/.test(url || '') ? 'none' : 'block'; }
 
 // Show a short message for 2.5 seconds.
 function toast(t) { toastEl.textContent = t; toastEl.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.style.display = 'none', 2500); }
@@ -102,6 +119,20 @@ function onAction(a) {
   cursor.style.display = 'block';
   cursor.style.transform = 'translate(' + x + 'px,' + y + 'px)' + (cursor.classList.contains('down') ? ' scale(.8)' : '');
   // Pass the action to the app as mouse events. A release over the same element as the press becomes a click.
+  // A pinch on the Home button goes home instead of reaching the app underneath.
+  const overHome = onHome(x, y);
+  homeBtn.classList.toggle('hover', overHome);
+  // When the Pi turns pinches into real touches (a.os), the touch itself clicks (in any page, external ones too),
+  // so this page only shows the press; it still passes cursor moves along for hover effects.
+  if (a.os && (a.kind === 'down' || a.kind === 'up')) {
+    cursor.classList.toggle('down', a.kind === 'down');
+    return;
+  }
+  if (overHome && (a.kind === 'down' || a.kind === 'up')) {
+    if (a.kind === 'down') { cursor.classList.add('down'); lastDown = homeBtn; }
+    else { cursor.classList.remove('down'); if (lastDown === homeBtn) goHome(); lastDown = null; }
+    return;
+  }
   const t = target(x, y);
   if (a.kind === 'move') fire(t, 'mousemove', x, y);
   else if (a.kind === 'down') { cursor.classList.add('down'); lastDown = t && t.el; fire(t, 'mousedown', x, y); }
@@ -165,7 +196,7 @@ function connect() {
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t === 'action') onAction(m);
-    else if (m.t === 'content') { if (frame.getAttribute('src') !== m.url) frame.src = m.url; }
+    else if (m.t === 'content') { if (frame.getAttribute('src') !== m.url) frame.src = m.url; showHome(m.url); }
     else if (m.t === 'calib') onCalib(m);
     else if (m.t === 'calib_pattern') onPattern(m);
     else if (m.t === 'brightness') document.getElementById('dim').style.opacity = 1 - m.value;

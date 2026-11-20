@@ -267,6 +267,9 @@ def cmd_sim(a):
     print("simulator started (pid %d), %d camera(s), %s" % (pid, a.cams, ("%ss" % a.seconds) if a.seconds else "until `stop`"))
 
 
+TOUCH_DEV = "/dev/virtual_touchscreen"
+
+
 # `pi-start`: everything on one machine (the Raspberry Pi): hub + camera agent + fullscreen display.
 def cmd_pi_start(a):
     # 1. The hub.
@@ -280,6 +283,12 @@ def cmd_pi_start(a):
                "--source", a.source, "--cams", *[str(c) for c in a.cams]]
         if a.os_pointer:
             cmd.append("--os-pointer")
+        # Real touches (clicks work in external websites too) when the virtual touchscreen is set up (~/ts.sh).
+        if not a.no_touch and os.access(TOUCH_DEV, os.W_OK):
+            cmd += ["--touch-device", TOUCH_DEV]
+            print("virtual touchscreen found: pinches become real touches")
+        elif not a.no_touch:
+            print("no writable %s: clicks only work in our own pages (after a reboot run: sudo ~/ts.sh)" % TOUCH_DEV)
         if a.video:
             cmd += ["--video", os.path.abspath(a.video)]
         cmd += ["--max-hands", str(a.max_hands)]
@@ -524,6 +533,7 @@ def main():
                ("--video", dict(default="", help="video or photo file for --source video")),
                ("--cams", dict(type=int, nargs="+", default=[0])),
                ("--os-pointer", dict(action="store_true")),
+               ("--no-touch", dict(action="store_true", help="do not use the virtual touchscreen even if it is set up")),
                ("--max-hands", dict(type=int, choices=[1, 2], default=1, help="hands to track (2 enables two-hand zoom, uses more CPU)")))
     add("pi-start", cmd_pi_start, *pi_args, ("--no-kiosk", dict(action="store_true")))
     add("install-autostart", cmd_autostart, *pi_args, ("--remove", dict(action="store_true")))

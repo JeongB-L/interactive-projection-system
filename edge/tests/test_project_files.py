@@ -40,8 +40,10 @@ class SafeDefaults(unittest.TestCase):
         self.assertIn(".env", read(".gitignore").split())
         self.assertFalse(os.path.exists(os.path.join(ROOT, ".env.example")) and "sk-ant" in read(".env.example"))
 
-    def test_gesture_source_defaults_to_the_hub_engine(self):
-        self.assertEqual("hub", load_config()["gesture_source"])
+    def test_gesture_source_is_a_known_engine(self):
+        # "edge" (Johnny's engine) since 2026-11-20: on the wall it caught swipes the hub rules missed.
+        # The hub falls back to its own rules whenever the agent sends no motion data.
+        self.assertIn(load_config()["gesture_source"], ("hub", "edge"))
 
 
 class Dependencies(unittest.TestCase):

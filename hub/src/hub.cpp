@@ -66,7 +66,7 @@ namespace ips
 
 	// Set up storage and the mapper, load any saved calibration, and start on the launcher.
 	Hub::Hub(Config cfg)
-		: cfg_(cfg), mapper_(cfg.screen_w, cfg.screen_h), rec_(cfg.gesture, cfg.screen_w, cfg.screen_h), calib_hold_(cfg.gesture)
+		: cfg_(cfg), mapper_(cfg.screen_w, cfg.screen_h), rec_(cfg.gesture, cfg.screen_w, cfg.screen_h), click_steady_(cfg.gesture), calib_hold_(cfg.gesture)
 	{
 		// The edge adapter uses the same cursor dead zone as our own recognizer.
 		edge_adapter_ = EdgeAdapter(cfg_.gesture.dead_zone_px);
@@ -251,7 +251,7 @@ namespace ips
 		{
 			gs = hub_gs;
 		}
-		for (const auto &g : gs)
+		for (const auto &g : click_steady_.filter(gs))
 			handle_gesture(g, t0);
 		// While calibrating, a marker counts only once the pinch has been held still long enough.
 		if (calib_step_ >= 0)
@@ -354,6 +354,9 @@ namespace ips
 		++gesture_counts_[g.kind];
 		++actions_;
 		json a = {{"t", "action"}, {"kind", g.kind}, {"x", int(std::lround(g.x))}, {"y", int(std::lround(g.y))}, {"detail", g.dir}};
+		// "os": the Pi also turns this action into a real touch / mouse event, so the display page must not click too.
+		if (edge_os_pointer_)
+			a["os"] = true;
 		// Keep a short list of recent non-move gestures for the status page.
 		if (g.kind != "move")
 		{

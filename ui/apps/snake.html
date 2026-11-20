@@ -2,7 +2,8 @@
 <!--
 ui/apps/snake.html
 WHAT THIS FILE DOES
-  A small Snake game, controlled by hand swipes (left / right / up / down) or the arrow keys.
+  A small Snake game. Point at the wall and the snake steers toward your fingertip (the cursor).
+  Hand swipes (left / right / up / down) and the arrow keys also steer.
   Works fully offline. Pinch (click) to start or restart.
 -->
 <html lang="en"><head><meta charset="utf-8"><title>Snake</title>
@@ -13,7 +14,7 @@ WHAT THIS FILE DOES
   #hud { font-size: 28px; margin-bottom: 12px; }
 </style></head>
 <body>
-<div id="hud">Score 0 — swipe to steer, pinch to start</div>
+<div id="hud">Score 0 — pinch to start, then point where the snake should go</div>
 <canvas id="c" width="800" height="600"></canvas>
 <script>
 // Canvas, its drawing context, and the score line.
@@ -30,6 +31,7 @@ function start() {
 function place() { food = { x: Math.floor(Math.random() * 40), y: Math.floor(Math.random() * 30) }; }
 // One game tick: move the head; end the game on a wall or self hit; grow when eating; redraw.
 function step() {
+  chase();
   const h = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
   if (h.x < 0 || h.y < 0 || h.x >= 40 || h.y >= 30 || snake.some(s => s.x === h.x && s.y === h.y)) {
     clearInterval(timer); timer = null; hud.textContent = 'Game over, score ' + score + ' — pinch to restart'; return;
@@ -46,6 +48,23 @@ function steer(d) {
   const m = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] }[d]; if (!m) return;
   if (m[0] === -dir.x && m[1] === -dir.y) return;   // no reversing
   dir = { x: m[0], y: m[1] };
+}
+// Pointer steering: the last place the cursor (fingertip) was, in cells; null until the first move.
+let target = null;
+addEventListener('mousemove', e => {
+  const r = c.getBoundingClientRect();
+  target = { x: (e.clientX - r.left) / r.width * 40, y: (e.clientY - r.top) / r.height * 30 };
+});
+// Each tick, turn the head toward the target along the axis with the larger gap.
+// If that turn would be a reversal, try the other axis instead; when the head is on the target, go straight.
+function chase() {
+  if (!target) return;
+  const dx = target.x - (snake[0].x + 0.5), dy = target.y - (snake[0].y + 0.5);
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+  const horiz = dx > 0 ? 'right' : 'left', vert = dy > 0 ? 'down' : 'up';
+  const first = Math.abs(dx) >= Math.abs(dy) ? horiz : vert, second = first === horiz ? vert : horiz;
+  const before = dir; steer(first);
+  if (dir === before && Math.abs(first === horiz ? dy : dx) >= 1) steer(second);
 }
 // Controls: hand swipes (a custom event from the display page), arrow keys for testing, and a click/pinch to start.
 addEventListener('ips-swipe', e => steer(e.detail.dir));

@@ -917,3 +917,46 @@ int main() {
   std::printf("%d checks, %d failed\n", g_run, g_fail);
   return g_fail ? 1 : 0;
 }
+
+// ---- click steadier: pinch drift must not move the click (the fingertip slides while the fingers close) ----------
+
+static Gesture gst(const char *k, double x, double y, int64_t ms) { return Gesture{k, x, y, "", ms * 1000}; }
+
+TEST(click_steady_presses_where_the_cursor_was_before_the_fingers_closed) {
+	GestureConfig c;  // 150 ms rewind
+	ClickSteady cs(c);
+	std::vector<Gesture> in;
+	for (int i = 0; i <= 10; ++i) in.push_back(gst("move", 500, 300, i * 33));      // resting on the button
+	in.push_back(gst("move", 520, 330, 363));                                       // fingers closing: tip drifts
+	in.push_back(gst("move", 540, 350, 396));
+	in.push_back(gst("down", 540, 350, 396));
+	auto out = cs.filter(in);
+	CHECK(out.back().kind == "down" && out.back().x == 500 && out.back().y == 300);
+}
+
+TEST(click_steady_holds_the_cursor_while_pinched_and_releases_on_the_press_spot) {
+	GestureConfig c;
+	ClickSteady cs(c);
+	cs.filter({gst("move", 500, 300, 0), gst("down", 500, 300, 200)});
+	auto out = cs.filter({gst("move", 530, 320, 233), gst("up", 540, 330, 266)});   // small wobble, then release
+	CHECK(out.size() == 1 && out[0].kind == "up" && out[0].x == 500 && out[0].y == 300);
+}
+
+TEST(click_steady_turns_a_long_pinched_move_into_a_drag) {
+	GestureConfig c;  // 250 px drag threshold
+	ClickSteady cs(c);
+	cs.filter({gst("move", 500, 300, 0), gst("down", 500, 300, 200)});
+	auto out = cs.filter({gst("move", 900, 300, 233), gst("up", 920, 300, 266)});
+	CHECK(out.size() == 2 && out[0].kind == "move" && out[0].x == 900);
+	CHECK(out[1].kind == "up" && out[1].x == 920);
+	out = cs.filter({gst("move", 1000, 300, 300)});                                    // released: moves pass freely again
+	CHECK(out.size() == 1 && out[0].x == 1000);
+}
+
+TEST(click_steady_with_no_rewind_changes_nothing_but_the_hold) {
+	GestureConfig c;
+	c.click_rewind_ms = 0;
+	ClickSteady cs(c);
+	auto out = cs.filter({gst("move", 500, 300, 0), gst("move", 540, 350, 200), gst("down", 540, 350, 200)});
+	CHECK(out.back().x == 540 && out.back().y == 350);
+}

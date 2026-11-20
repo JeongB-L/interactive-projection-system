@@ -4,22 +4,25 @@ ui/apps/launcher.html
 WHAT THIS FILE DOES
   The home screen: one big tile per app listed by the hub (config.json). Point at a tile and pinch
   to launch it. An open palm held still returns here from any app.
+  The last tile, "Calibrate", runs the automatic surface calibration (same as `ips.py calibrate auto`).
 -->
 <html lang="en"><head><meta charset="utf-8"><title>Launcher</title>
 <!-- Styles: dark background, centered row of large tiles; a tile gets a blue border while the cursor is over it. -->
 <style>
   body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
   h1 { font-weight: 500; margin: 0 0 32px; }
-  #grid { display: flex; gap: 32px; }
-  .tile { width: 260px; height: 200px; border-radius: 20px; background: #1e293b; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 32px; border: 4px solid transparent; cursor: pointer; }
-  .tile small { font-size: 16px; color: #94a3b8; margin-top: 8px; }
+  #grid { display: flex; gap: 48px; }
+  .tile { width: 320px; height: 260px; border-radius: 20px; background: #1e293b; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 40px; border: 6px solid transparent; cursor: pointer; }
+  .tile small { font-size: 20px; color: #94a3b8; margin-top: 8px; }
   .tile.hot { border-color: #38bdf8; background: #334155; }
+  #calmsg { color: #fde047; font-size: 24px; margin-top: 24px; min-height: 32px; text-align: center; }
   p { color: #94a3b8; margin-top: 40px; font-size: 18px; }
 </style></head>
 <body>
 <h1>Pick an app</h1>
 <!-- The tiles are created by the script below once the hub tells us which apps exist. -->
 <div id="grid"></div>
+<div id="calmsg"></div>
 <p>Point with your index finger, pinch to select. Hold an open palm still to come back here.</p>
 <script>
 // 'hot' is the tile currently under the cursor (highlighted).
@@ -34,7 +37,42 @@ fetch('/api/apps').then(r => r.json()).then(apps => {
     d.addEventListener('click', () => fetch('/api/launch', { method: 'POST', body: JSON.stringify({ app: a.id }) }));
     g.appendChild(d);
   });
+  // Extra tile: automatic calibration.
+  const d = document.createElement('div'); d.className = 'tile';
+  d.innerHTML = 'Calibrate<small>fix the cursor position</small>';
+  d.addEventListener('click', calibrate);
+  g.appendChild(d);
 });
+
+// Automatic calibration: count down so the person can step out of the camera's view, start it,
+// then wait for the result and show it. The marker pattern covers the screen for a few seconds meanwhile.
+const calmsg = document.getElementById('calmsg');
+let calibrating = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function calibrate() {
+  if (calibrating) return;
+  calibrating = true;
+  try {
+    for (let n = 3; n > 0; n--) { calmsg.textContent = 'Calibrating in ' + n + '... step aside, keep your hands off the wall'; await sleep(1000); }
+    calmsg.textContent = 'Calibrating... keep the view clear';
+    const r = await (await fetch('/api/calibrate/auto', { method: 'POST', body: '{}' })).json();
+    if (!r.ok) { calmsg.textContent = 'Cannot calibrate: ' + (r.error || 'no answer from the hub'); return; }
+    for (let i = 0; i < 60; i++) {   // up to 30 s
+      await sleep(500);
+      const s = await (await fetch('/api/status')).json();
+      const last = (s.auto_calib || {}).last;
+      if (last && last.id === r.id) {
+        calmsg.textContent = (last.results || []).map(x => x.ok
+          ? 'Calibrated (' + (x.quality || '?') + '): ' + x.markers + '/' + x.of + ' markers, error ' + (+x.rms_px).toFixed(1) + ' px'
+          : 'Calibration failed: ' + (x.reason || 'unknown reason') + '. The old calibration is kept.').join(' | ') || ('Calibration failed: ' + (last.error || 'no result'));
+        return;
+      }
+    }
+    fetch('/api/calibrate/cancel', { method: 'POST', body: '{}' });
+    calmsg.textContent = 'No answer from the camera; calibration cancelled.';
+  } catch (e) { calmsg.textContent = 'Calibration error: ' + e; }
+  finally { calibrating = false; }
+}
 // Hover highlight. The cursor dot sends synthetic mouse moves, and CSS :hover ignores those,
 // so we toggle the highlight class ourselves.
 addEventListener('mousemove', e => {

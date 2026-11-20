@@ -126,6 +126,7 @@ namespace ips
 		// calibration state: which marker we are on, and the fingertip samples collected so far
 		int calib_step_ = -1;							 // -1 = not calibrating
 		std::vector<std::map<int, Vec2>> calib_samples_; // per step: camera -> raw fingertip
+		ClickSteady click_steady_;						 // pinch-drift fix applied to the acting engine's gestures
 		CalibHold calib_hold_;							 // only a held, still pinch counts as a marker press
 		// automatic surface calibration: the running request (0 = none) and the outcome of the last one
 		int auto_calib_seq_ = 0;		// id of the most recent request

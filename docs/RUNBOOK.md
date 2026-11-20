@@ -56,6 +56,21 @@ python3 ips.py stop
 Options: `--source camera` for a USB webcam, `--cams 0 1` for two cameras, `--os-pointer` to drive real windows, `--no-kiosk` to skip the browser.
 `python3 ips.py install-autostart` makes `pi-start` run at desktop login (`--remove` undoes it).
 
+### Using it on the wall (tested 2026-11-20)
+- **Point** with the index finger: the red dot follows. **Pinch** (thumb + index, then open) to click. A pinch is always a
+  click at the spot you pointed at just before pinching; the cursor does not follow the hand while pinched
+  (`click_rewind_ms` and `click_drag_px` in `config.json`; measured: the tracked fingertip jumps ~250 px as the fingers close).
+- **Home**: pinch the ⌂ Home button at the bottom center of every app, or hold an open palm still for 1 s.
+- **Calibrate** tile in the launcher = `calibrate auto` (3 s countdown so you can step aside, then the result is shown).
+- **Snake**: pinch to start, then point where the snake should go (it turns toward the cursor). Swipes also steer.
+- **Clicks in external websites (Browser tile)**: need the virtual touchscreen. After every reboot run `sudo ~/ts.sh`
+  (loads the module, makes `/dev/virtual_touchscreen` writable for the user), then `pi-start`. When the device is writable,
+  `pi-start` passes `--touch-device /dev/virtual_touchscreen` to the agent and every pinch becomes a real touch (works in
+  any page); otherwise clicks only work in our own pages. `--no-touch` turns this off. The device can be opened by one
+  program at a time, so Nina's `version1/test.py --device` and the agent cannot both use it.
+- `config.json` has `"gesture_source": "edge"` (Johnny's engine decides pinches and swipes; it caught swipes that the hub
+  rules missed). Set it back to `"hub"` to use the hub's own rules.
+
 What to check first on the real Pi (none of this has run on hardware yet):
 1. `python3 ips.py logs` and `data/logs/agent.log` after `pi-start`: the agent should print "connected to hub" and `status` should show about 20-30 fps.
 2. Colors: picamera2's "RGB888" frames are in B,G,R order; the agent now converts them for MediaPipe. If detection is poor, record a frame (`record.frames: true`) and check that skin looks normal.
@@ -172,4 +187,4 @@ The debug picture shows the markers found (green) and the projected screen's gri
 - **Port in use**: change `port` in `config.json` and `set IPS_URL=http://127.0.0.1:<port>`.
 - **Cursor stuck at wrong place after moving the projector or camera**: `python3 ips.py calibrate auto`.
 - **`calibrate auto` says "pattern not found"**: the camera does not see the projected picture (check with `calibrate pattern` and a photo), or the room is so bright the markers wash out.
-- **Browser app doesn't react to gestures**: external websites can't be driven from the display page; run the agent with `--os-pointer`.
+- **Browser app doesn't react to gestures**: external websites can't be driven from the display page. Run `sudo ~/ts.sh`, then `python3 ips.py stop` and `pi-start` (pinches become real touches), or run the agent with `--os-pointer`.

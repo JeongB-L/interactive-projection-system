@@ -146,10 +146,16 @@ class Link:
         self.ws = WS(host, int(port), "/edge")
         # First message: who we are, which cameras we have, and whether we want real OS mouse events.
         hello = {"t": "hello", "device": args.device, "source": args.source,
-                 "cameras": list(range(len(args.cam_list))), "os_pointer": args.os_pointer,
+                 "cameras": list(range(len(args.cam_list))), "os_pointer": bool(args.os_pointer or args.touch_device),
                  "token": os.environ.get("IPS_TOKEN", "")}
         self.ws.send_text(json.dumps(hello))
-        self.pointer = OsPointer() if args.os_pointer else None
+        self.pointer = None
+        if args.touch_device:
+            w, h = (int(v) for v in args.screen.lower().split("x"))
+            self.pointer = TouchPointer(args.touch_device, w, h)
+            print("clicks go to the virtual touchscreen %s (screen %dx%d)" % (args.touch_device, w, h), flush=True)
+        elif args.os_pointer:
+            self.pointer = OsPointer()
         self.alive = True
         # Automatic surface calibration reports through whichever connection is current (the agent reconnects).
         calib = getattr(args, "calib", None)
@@ -167,7 +173,11 @@ class Link:
                 if m.get("t") == "hello_ack":
                     print("hub session", m.get("session"), "record_frames", m.get("record_frames"), flush=True)
                 elif m.get("t") == "action" and self.pointer:
-                    self.pointer.apply(m)
+                    try:
+                        self.pointer.apply(m)
+                    except OSError as e:  # e.g. the touchscreen module was unloaded: keep tracking, stop injecting
+                        print("pointer output failed, turning it off:", e, flush=True)
+                        self.pointer = None
                 elif m.get("t") == "calib_capture":
                     self.start_calibration(m)
                 elif m.get("t") == "calib_cancel" and getattr(self.args, "calib", None) is not None:
@@ -255,6 +265,51 @@ class OsPointer:
             self.g.mouseUp()
         elif k == "swipe":
             self.g.press({"left": "left", "right": "right", "up": "up", "down": "down"}[a["detail"]])
+
+
+class TouchPointer:
+    """Turns hub actions into real touches on the Linux virtual touchscreen (/dev/virtual_touchscreen, the kernel
+    module from ~/virtual_touchscreen that Nina's version1 also uses; ~/ts.sh sets it up after a reboot).
+    Touches are absolute (no pointer acceleration), so a pinch taps exactly where the cursor is, in ANY page,
+    including external websites that the display page cannot click into. Only presses, drags and releases are
+    sent: a touchscreen has no hover, so plain cursor moves stay with the display page."""
+
+    MAX = 1024  # the module's ABS_X_MAX / ABS_Y_MAX
+
+    def __init__(self, path, screen_w, screen_h):
+        self.fd = os.open(path, os.O_WRONLY)
+        self.w, self.h = max(2, screen_w), max(2, screen_h)
+        self.down = False
+        self.track = 0
+
+    # Write one block of commands, framed by "select slot 0" and "sync" like the module expects.
+    def _block(self, *cmds):
+        data = ("".join(c + "\n" for c in ("s 0", *cmds, "S 0"))).encode("ascii")
+        if os.write(self.fd, data) != len(data):
+            raise OSError("short write to the virtual touchscreen")
+
+    # Projector pixels -> device units 0..MAX.
+    def _dev(self, a):
+        x = round(min(max(a.get("x", 0), 0), self.w - 1) * self.MAX / (self.w - 1))
+        y = round(min(max(a.get("y", 0), 0), self.h - 1) * self.MAX / (self.h - 1))
+        return x, y
+
+    def apply(self, a):
+        k = a.get("kind")
+        if k == "down" and not self.down:
+            x, y = self._dev(a)
+            self.track += 1
+            self._block("T %d" % self.track, "X %d" % x, "Y %d" % y, "x %d" % x, "y %d" % y, "0 10", ": 100", "e 0", "d 0")
+            self.down = True
+        elif k == "move" and self.down:
+            x, y = self._dev(a)
+            self._block("X %d" % x, "Y %d" % y, "x %d" % x, "y %d" % y)
+        elif k in ("up", "hide") and self.down:
+            if k == "up":
+                x, y = self._dev(a)
+                self._block("X %d" % x, "Y %d" % y, "x %d" % x, "y %d" % y)
+            self._block("T -1", "0 10", ": 100", "e 0", "u 0")
+            self.down = False
 
 
 # If a camera delivers no frame for this many seconds, the agent says so (instead of waiting silently).
@@ -566,6 +621,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=0, help="0 = run until stopped")
     ap.add_argument("--replay", help="events.ndjson recorded by the hub")
     ap.add_argument("--os-pointer", action="store_true", help="inject real OS mouse events (needs pyautogui)")
+    ap.add_argument("--touch-device", default="", help="send pinches as real touches to this virtual touchscreen "
+                    "(e.g. /dev/virtual_touchscreen); makes clicks work in any page, external websites included")
+    ap.add_argument("--screen", default="1920x1080", help="projector size in pixels, for --touch-device")
     ap.add_argument("--send-frames", action="store_true", help="also send JPEG frames (the hub stores them if record.frames is true)")
     ap.add_argument("--device", default="pi5")
     ap.add_argument("--max-hands", type=int, choices=[1, 2], default=1,
