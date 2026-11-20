@@ -9,6 +9,8 @@
 #     2. gesture_source "edge" : Johnny's engine acts (our rules still supply "home")
 #     3. "edge" with the agent's motion engine switched off: the hub falls back to its own rules
 #     4. recording + replay    : a recorded session replayed into a fresh hub gives the SAME engine results
+#   Plus "SurfaceCalibration": the automatic camera -> projected-surface calibration through the real hub and the
+#   real `ips.py calibrate auto` command (camera frames are synthetic pictures of the projected pattern).
 #   Plus a "Hardening" group that attacks the hub: URLs that try to leave the web folder, sensitive calls from another
 #   machine, malformed messages, and a stuck display connection (each of these was a real bug found in review).
 #   Each scenario plays the scripted 12-second routine (2 clicks, a swipe, an open-palm hold, a two-hand zoom).
@@ -338,6 +340,132 @@ class Hardening(unittest.TestCase):
             finally:
                 proc.wait(timeout=30)
             self.assertTrue(25 <= fps <= 35, "expected about 30 frames/s, the status page said %.1f" % fps)
+
+
+# Messages a connected display page receives, collected on a background thread.
+class DisplayListener:
+    def __init__(self):
+        sys.path.insert(0, os.path.join(ROOT, "edge"))
+        from wsclient import WS
+        self.ws = WS("127.0.0.1", PORT, "/display")
+        self.msgs = []
+        import threading
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            while True:
+                self.msgs.append(json.loads(self.ws.recv_text()))
+        except Exception:
+            pass
+
+    def of(self, t):
+        return [m for m in self.msgs if m.get("t") == t]
+
+    def close(self):
+        self.ws.close()
+
+
+def have_cv():
+    try:
+        import cv2  # noqa: F401
+        import numpy  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(os.path.exists(EXE), "build the hub first: python ips.py build")
+class SurfaceCalibration(unittest.TestCase):
+    def calibrate_cli(self, timeout=15):
+        cmd = [sys.executable, os.path.join(ROOT, "ips.py"), "calibrate", "auto", "--timeout", str(timeout)]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30,
+                              env=dict(os.environ, IPS_URL="http://127.0.0.1:%d" % PORT))
+
+    @unittest.skipUnless(have_cv(), "needs OpenCV + numpy")
+    def test_c1_auto_calibration_maps_the_fingertip_onto_the_projected_surface(self):
+        import random
+        import threading
+        import types
+        sys.path.insert(0, os.path.join(ROOT, "edge"))
+        sys.path.insert(0, os.path.join(ROOT, "edge", "tests"))
+        import agent
+        import surface_calib as sc
+        import test_surface_calib as pics  # synthetic camera pictures of the projected pattern, with the true mapping
+        with HubProcess("hub") as hub:
+            display = DisplayListener()
+            # The real agent connection and calibrator; frames come from a synthetic camera instead of the Pi camera.
+            args = types.SimpleNamespace(hub="127.0.0.1:%d" % PORT, device="e2e-cam", source="video", cam_list=[0],
+                                         os_pointer=False)
+            args.calib = sc.AutoCalibrator(lambda m: None, [0], settle_s=0.3, want_frames=5, timeout_s=10)
+            link = agent.Link(args)
+            frame = pics.camera_image()
+            target = {"tip": None}  # where the fake fingertip is (normalized camera coordinates), None = no hand
+            stop = threading.Event()
+
+            def camera_loop():
+                rng, seq = random.Random(1), 0
+                while not stop.is_set():
+                    agent.feed_calibration(args, 0, frame, False)
+                    hands = []
+                    if target["tip"]:
+                        hands = [{"right": True, "score": 0.95,
+                                  "pts": agent.make_hand(target["tip"][0], target["tip"][1], "point", 0.0, rng, 0.0)}]
+                    link.send(agent.hands_message(0, seq, int(time.time() * 1e6), 5.0, hands))
+                    seq += 1
+                    time.sleep(1 / 30)
+            cam = threading.Thread(target=camera_loop, daemon=True)
+            cam.start()
+            try:
+                time.sleep(0.5)
+                out = self.calibrate_cli()
+                self.assertEqual(0, out.returncode, out.stdout + out.stderr)
+                self.assertIn("camera 0: calibrated (good)", out.stdout)
+                s = hub.status()
+                self.assertTrue(s["cameras"]["0"]["calibrated"])
+                self.assertTrue(os.path.exists(os.path.join(hub.dir, "calibration.json")))
+                # The display was shown the pattern, then it was taken down and a result announced.
+                shown = [m for m in display.of("calib_pattern") if m.get("show")]
+                self.assertEqual(15, len(shown[0]["markers"]))
+                self.assertFalse(display.of("calib_pattern")[-1]["show"])
+                self.assertEqual(1, display.of("calib")[-1]["cameras_calibrated"])
+                # Now point at a spot on the surface: the cursor must land where that spot is on the PROJECTED picture.
+                cx, cy = 450, 300  # camera pixels, inside the projected area
+                target["tip"] = (cx / pics.CW, cy / pics.CH)
+                time.sleep(1.5)
+                moves = [m for m in display.of("action") if m.get("kind") == "move"]
+                tx, ty = pics.truth(cx, cy)
+                x, y = moves[-1]["x"], moves[-1]["y"]
+                self.assertLess(abs(x - tx * 1920), 12, (x, y, tx * 1920, ty * 1080))
+                self.assertLess(abs(y - ty * 1080), 12, (x, y, tx * 1920, ty * 1080))
+            finally:
+                stop.set()
+                cam.join(timeout=2)
+                link.ws.close()
+                display.close()
+
+    def test_c2_auto_calibration_explains_why_it_cannot_run(self):
+        with HubProcess("hub") as hub:
+            out = self.calibrate_cli(timeout=5)
+            self.assertNotEqual(0, out.returncode)
+            self.assertIn("no camera agent is connected", out.stdout + out.stderr)
+            # An agent without camera images (the simulator) answers at once instead of leaving the pattern up.
+            cmd = [sys.executable, os.path.join(ROOT, "edge", "agent.py"), "--hub", "127.0.0.1:%d" % PORT,
+                   "--source", "synthetic", "--seconds", "8"]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                time.sleep(1.5)
+                display = DisplayListener()
+                t0 = time.time()
+                out = self.calibrate_cli(timeout=10)
+                self.assertNotEqual(0, out.returncode)
+                self.assertIn("no camera images", out.stdout)
+                self.assertLess(time.time() - t0, 5, "the failure must be reported promptly")
+                self.assertFalse(hub.status()["auto_calib"]["active"])
+                self.assertFalse(display.of("calib_pattern")[-1]["show"])
+                display.close()
+            finally:
+                proc.wait(timeout=30)
 
 
 if __name__ == "__main__":

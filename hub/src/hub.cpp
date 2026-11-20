@@ -151,6 +151,14 @@ namespace ips
 			recorder_.reset();
 		}
 		broadcast({{"t", "action"}, {"kind", "hide"}});
+		// An automatic calibration cannot finish without the agent: end it, and never leave the pattern on screen.
+		if (auto_calib_active_)
+		{
+			auto_calib_last_ = {{"id", auto_calib_active_}, {"ok", false}, {"cameras_calibrated", 0},
+								{"error", "the camera agent disconnected during calibration"}, {"results", json::array()}};
+			auto_calib_active_ = 0;
+			broadcast({{"t", "calib_pattern"}, {"show", false}});
+		}
 	}
 
 	// ---- pipeline --------------------------------------------------------------
@@ -403,6 +411,189 @@ namespace ips
 		broadcast({{"t", "calib"}, {"done", true}, {"cameras_calibrated", 0}});
 	}
 
+	// ---- automatic surface calibration -----------------------------------------------
+	// The agent owns the camera, so it does the measuring (edge/surface_calib.py); the hub only starts it, relays the
+	// pattern to the display, checks the agent's answer and installs it. See docs/PROTOCOL.md for the messages.
+
+	json Hub::calibrate_auto()
+	{
+		std::lock_guard lk(m_);
+		if (!edge_)
+			return {{"ok", false}, {"error", "no camera agent is connected (start it with `python3 ips.py pi-start`)"}};
+		calib_step_ = -1; // an unfinished pinch calibration is abandoned
+		auto_calib_active_ = ++auto_calib_seq_;
+		// The agent lays the markers out for the display's real size, so they come out square on screen.
+		send_edge({{"t", "calib_capture"}, {"id", auto_calib_active_}, {"screen", {mapper_.width(), mapper_.height()}}});
+		if (!edge_) // the send failed: the agent has gone
+		{
+			auto_calib_active_ = 0;
+			return {{"ok", false}, {"error", "the camera agent stopped responding"}};
+		}
+		return {{"ok", true}, {"id", auto_calib_seq_}};
+	}
+
+	void Hub::calibrate_cancel()
+	{
+		std::lock_guard lk(m_);
+		if (auto_calib_active_)
+		{
+			send_edge({{"t", "calib_cancel"}, {"id", auto_calib_active_}});
+			auto_calib_last_ = {{"id", auto_calib_active_}, {"ok", false}, {"cameras_calibrated", 0},
+								{"error", "cancelled"}, {"results", json::array()}};
+		}
+		auto_calib_active_ = 0;
+		broadcast({{"t", "calib_pattern"}, {"show", false}});
+	}
+
+	bool Hub::calibrate_set(int cam, const json &hj, std::string &error)
+	{
+		Homography h;
+		if (cam < 0 || cam > 15)
+		{
+			error = "camera index out of range";
+			return false;
+		}
+		if (!homography_from_json(hj, h))
+		{
+			error = "h must be 9 finite numbers forming a usable perspective mapping";
+			return false;
+		}
+		std::lock_guard lk(m_);
+		mapper_.set(cam, h);
+		calib_step_ = -1;
+		save_calibration();
+		broadcast({{"t", "calib"}, {"done", true}, {"cameras_calibrated", 1}});
+		return true;
+	}
+
+	// The request id in an agent message (-1 when missing or not a whole number).
+	static int id_of(const json &j)
+	{
+		return j.contains("id") && j["id"].is_number_integer() ? j["id"].get<int>() : -1;
+	}
+
+	// A text field from a message, or `fallback` when it is missing or not text (never throws), cut to `max` characters.
+	static std::string text_of(const json &j, const char *key, const std::string &fallback, size_t max = 300)
+	{
+		if (j.contains(key) && j[key].is_string())
+			return j[key].get<std::string>().substr(0, max);
+		return fallback;
+	}
+
+	// Copy only well-formed markers into a fresh message for the display: a bad message cannot inject anything.
+	static bool clean_pattern(const json &msg, json &out)
+	{
+		out = {{"t", "calib_pattern"}, {"show", msg.contains("show") && msg["show"].is_boolean() && msg["show"].get<bool>()}};
+		if (!out["show"].get<bool>())
+			return true;
+		if (!msg.contains("markers") || !msg["markers"].is_array() || msg["markers"].empty() || msg["markers"].size() > 64)
+			return false;
+		int grid = msg.contains("grid") && msg["grid"].is_number_integer() ? msg["grid"].get<int>() : 6;
+		if (grid < 5 || grid > 9)
+			return false;
+		json ms = json::array();
+		for (const auto &m : msg["markers"])
+		{
+			if (!m.is_object())
+				return false;
+			json c = {{"id", m.contains("id") && m["id"].is_number_integer() ? m["id"].get<int>() : 0}};
+			for (const char *k : {"x0", "y0", "x1", "y1"})
+			{
+				if (!m.contains(k) || !m[k].is_number())
+					return false;
+				double v = m[k].get<double>();
+				if (!std::isfinite(v) || v < -0.01 || v > 1.01)
+					return false;
+				c[k] = v;
+			}
+			if (c["x1"].get<double>() <= c["x0"].get<double>() || c["y1"].get<double>() <= c["y0"].get<double>())
+				return false;
+			std::string bits = text_of(m, "bits", "", 64);
+			if (bits.size() != size_t((grid - 2) * (grid - 2)) || bits.find_first_not_of("01") != std::string::npos)
+				return false;
+			c["bits"] = bits;
+			ms.push_back(c);
+		}
+		out["grid"] = grid;
+		out["markers"] = ms;
+		return true;
+	}
+
+	bool Hub::show_calib_pattern(const json &msg)
+	{
+		json clean;
+		if (!clean_pattern(msg, clean))
+			return false;
+		std::lock_guard lk(m_);
+		broadcast(clean);
+		return true;
+	}
+
+	void Hub::on_calib_pattern(const json &msg)
+	{
+		json clean;
+		std::lock_guard lk(m_);
+		if (!auto_calib_active_ || id_of(msg) != auto_calib_active_)
+			return; // not (or no longer) calibrating: ignore a late or stray message
+		if (clean_pattern(msg, clean))
+			broadcast(clean);
+		else
+			++bad_;
+	}
+
+	void Hub::on_calib_result(const json &msg)
+	{
+		std::lock_guard lk(m_);
+		if (!auto_calib_active_ || id_of(msg) != auto_calib_active_)
+			return; // a cancelled or superseded request
+		int solved = 0;
+		json summary = json::array();
+		std::string first_error;
+		if (msg.contains("results") && msg["results"].is_array())
+			for (const auto &r : msg["results"])
+			{
+				if (!r.is_object())
+					continue;
+				int cam = r.contains("cam") && r["cam"].is_number_integer() ? r["cam"].get<int>() : -1;
+				bool ok = r.contains("ok") && r["ok"].is_boolean() && r["ok"].get<bool>();
+				Homography h;
+				if (ok && (cam < 0 || cam > 15 || !r.contains("h") || !homography_from_json(r["h"], h)))
+				{
+					ok = false; // the agent claimed success but sent something unusable
+					if (first_error.empty())
+						first_error = "the agent sent an invalid mapping";
+				}
+				if (ok)
+				{
+					mapper_.set(cam, h);
+					++solved;
+				}
+				else if (first_error.empty())
+					first_error = text_of(r, "reason", "calibration failed");
+				// Keep the numbers for `ips.py calibrate auto` and the status page (not the matrix itself).
+				json s = {{"cam", cam}, {"ok", ok}};
+				for (const char *k : {"rms_px", "max_px", "markers", "of", "frames", "inliers"})
+					if (r.contains(k) && r[k].is_number())
+						s[k] = r[k];
+				if (r.contains("quality") && r["quality"].is_string())
+					s["quality"] = text_of(r, "quality", "", 20);
+				if (!ok)
+					s["reason"] = text_of(r, "reason", "calibration failed");
+				summary.push_back(s);
+			}
+		if (solved)
+			save_calibration();
+		auto_calib_last_ = {{"id", auto_calib_active_}, {"ok", solved > 0}, {"cameras_calibrated", solved}, {"results", summary}};
+		if (!solved)
+			auto_calib_last_["error"] = first_error.empty() ? "no camera result received" : first_error;
+		auto_calib_active_ = 0;
+		broadcast({{"t", "calib_pattern"}, {"show", false}});
+		json done = {{"t", "calib"}, {"done", true}, {"auto", true}, {"cameras_calibrated", solved}};
+		if (!solved)
+			done["error"] = auto_calib_last_["error"];
+		broadcast(done);
+	}
+
 	// Write the calibration to disk so it survives a restart.
 	void Hub::save_calibration()
 	{
@@ -499,6 +690,7 @@ namespace ips
 				{"motion_frames", motion_frames_},
 				{"compare", {{"hub", compare_hub_}, {"edge", compare_edge_}}},
 				{"calibrating_step", calib_step_},
+				{"auto_calib", {{"active", auto_calib_active_}, {"last", auto_calib_last_}}},
 				{"last_gestures", last_gestures_},
 				{"blob_base", blobs_->base_uri()}};
 	}

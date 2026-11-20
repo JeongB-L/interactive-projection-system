@@ -97,6 +97,7 @@ Cam0, Cam1 -> Pi agent --JSON/WS--> HUB --actions/content--> Display page (Chrom
 |---|---|---|---|
 | F-12 | Map camera coordinates to projector pixels with a per-camera homography. | MUST | Done (math unit-tested) |
 | F-13 | Calibration: four projected markers, pinch at each; homography per camera saved to `data/calibration.json` and reloaded. | MUST | Done in code; needs real camera to validate |
+| F-13b | Automatic surface calibration: the projector shows an ArUco marker pattern, the agent measures it with the camera and fits a robust homography (RANSAC, multi-frame median), reports its error in projector pixels, and the hub installs it. Works without a hand, from a recorded video too (`tools/surface_calib.py`). Calibrated positions are clamped to the screen. | MUST | Done; verified on synthetic camera views and a browser-rendered pattern; needs the real projector + camera to validate |
 | F-14 | The UI reaches the projector through the Pi over HDMI: the Pi shows a fullscreen browser page and the hub sends actions to it. | MUST | Done (display page); Pi kiosk Untested |
 | F-14b | For pages the display shell cannot control (a real external website), the Pi agent injects **OS-level mouse events** from the same actions (`--os-pointer`). | SHOULD | Untested |
 | F-15 | Stream content into the page (video) while the cursor stays locally rendered. | SHOULD | Not yet (page can embed any URL) |

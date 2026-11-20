@@ -24,6 +24,7 @@ Johnny and Nina are still improving gesture detection. Low gesture accuracy (e.g
 - `edge/tests/`, `tests/e2e.py`: tests.
 - `ui/`: the projected page and apps (launcher, Snake, AI chat).
 - `tools/video_probe.py`, `tools/probe_csv.py`: offline diagnosis of a gesture video.
+- `edge/surface_calib.py`: automatic surface calibration (ArUco pattern on the projector → camera-to-screen homography). `tools/surface_calib.py`: the same from a recorded video (`fit FILE [--apply]`), or show/hide the pattern.
 - `docs/`: SPEC, RUNBOOK, PROTOCOL.
 - `version1/`: Nina's standalone path. `test.py` reads the camera with Picamera2, runs MediaPipe's gesture recognizer (`gesture_recognizer.task`), and prints virtual_touchscreen commands on stdout. Default click gesture is `Thumb_Up`. `test_click_only.py` is an older variant that sends only touch down/up. Camera-only: neither script has a video-file input. How to run it: `version1/steps.md`.
 
@@ -34,7 +35,9 @@ python3 ips.py start | stop | status | logs
 python3 ips.py pi-start       # on the Pi: hub + camera agent + fullscreen display
 python3 ips.py test           # all unit suites (C++ hub, Python agent/motion, Johnny's tracker)
 python3 ips.py test --e2e     # adds the end-to-end suite (starts a real hub on port 8099)
+python3 ips.py calibrate auto # map the camera onto the projected surface (needs pi-start running; no hand needed)
 ```
+- Redo `calibrate auto` whenever the camera or projector moves. It only needs the camera to see the projected picture, so it works with nobody at the Pi.
 - `start` only builds the hub if `build/ipsd` is missing. After pulling changes under `hub/`, run `python3 ips.py build` yourself.
 - `status` shows the comparison between the two gesture engines (hub rules vs Johnny's).
 - Do not run `test --e2e` while the hub is up for a demo. Run `python3 ips.py stop` first.

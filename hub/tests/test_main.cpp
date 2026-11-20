@@ -5,7 +5,8 @@
 //   below registers itself, main() at the bottom runs them all, and CHECK(...) records a failure.
 //   Run with:  python ips.py test      (exit code 0 = all passed)
 //   Covered: homography math, cursor mapping, pinch hysteresis, swipe, home, hand loss, dead zone,
-//            two-camera fusion (including the pose-change bug fix), and the blob store + SQLite catalog.
+//            two-camera fusion (including the pose-change bug fix), the blob store + SQLite catalog, and the
+//            automatic surface calibration (validation, clamping, the hub side of the agent protocol).
 // ---------------------------------------------------------------------------
 // Minimal self-contained tests (no framework). Run: ips_tests
 #include <cstdio>
@@ -646,6 +647,191 @@ TEST(calibration_made_at_one_display_size_still_fits_after_a_resize) {
 	const json *after = f.first("move");
 	CHECK(after && std::abs((*after)["x"].get<int>() - 1000) <= 25);    // the same camera spot is still the middle, now of a 2000 px wide screen
 }
+// ---- automatic surface calibration ---------------------------------------------------------------------------------
+
+TEST(homography_from_json_accepts_a_usable_matrix_and_normalizes_it) {
+	Homography h;
+	CHECK(homography_from_json(json::array({2, 0, 0.2, 0, 2, 0.2, 0, 0, 2}), h));  // scaled by 2: same mapping
+	CHECK(std::fabs(h.h[8] - 1) < 1e-12 && std::fabs(h.h[0] - 1) < 1e-12 && std::fabs(h.h[2] - 0.1) < 1e-12);
+}
+
+TEST(homography_from_json_rejects_anything_unusable) {
+	Homography h;
+	h.h = {7, 7, 7, 7, 7, 7, 7, 7, 7};
+	CHECK(!homography_from_json(json::array({1, 0, 0, 0, 1, 0, 0, 0}), h));             // 8 numbers
+	CHECK(!homography_from_json(json::array({1, 0, 0, 0, 1, 0, 0, 0, "1"}), h));        // text
+	CHECK(!homography_from_json(json::array({1, 0, 0, 0, 1, 0, 0, 0, 0}), h));          // h[8] = 0
+	CHECK(!homography_from_json(json::array({1, 2, 0, 2, 4, 0, 0, 0, 1}), h));          // singular (rows dependent)
+	CHECK(!homography_from_json(json::array({1, 0, 0, 0, 1, 0, 0, 0, std::nan("")}), h));
+	CHECK(!homography_from_json(json("nonsense"), h));
+	CHECK(h.h[0] == 7);  // left untouched on failure
+}
+
+TEST(calibrated_points_beyond_the_surface_stay_on_the_screen_edge) {
+	Mapper m(1000, 500);
+	Homography identity;
+	m.set(0, identity);
+	Vec2 p = m.to_px(0, {1.3, -0.2});  // a fingertip beyond the right / top edge of the projected picture
+	CHECK(std::fabs(p.x - 1000) < 1e-9 && std::fabs(p.y - 0) < 1e-9);
+	Vec2 q = m.to_px(1, {1.3, -0.2});  // an uncalibrated camera is unchanged (plain scaling)
+	CHECK(std::fabs(q.x - 1300) < 1e-9);
+	Homography blowup;
+	blowup.h = {1, 0, 0, 0, 1, 0, 1, 0, -0.5};  // perspective divide reaches zero at x = 0.5 (the "horizon")
+	m.set(2, blowup);
+	Vec2 r = m.to_px(2, {0.5, 0.5});
+	CHECK(std::isfinite(r.x) && std::isfinite(r.y) && r.x >= 0 && r.x <= 1000 && r.y >= 0 && r.y <= 500);
+}
+
+// A HubFixture with a fake agent attached whose messages from the hub are captured.
+struct AutoCalibFixture : HubFixture {
+	std::vector<json> to_edge;
+	bool edge_alive = true;
+	AutoCalibFixture() : HubFixture("hub") {
+		hub->edge_connected({{"t", "hello"}, {"device", "test"}, {"source", "picamera"}}, [this](const std::string &m) {
+			if (edge_alive) to_edge.push_back(json::parse(m));
+			return edge_alive;
+		});
+	}
+	json last(const std::string &t) const {
+		for (auto it = all.rbegin(); it != all.rend(); ++it) if (it->value("t", "") == t) return *it;
+		return nullptr;
+	}
+};
+
+static json pattern_msg(int id, const std::string &bits = "0110100110010110") {
+	return {{"t", "calib_pattern"}, {"id", id}, {"show", true}, {"grid", 6},
+			{"markers", json::array({{{"id", 0}, {"x0", 0.1}, {"y0", 0.1}, {"x1", 0.2}, {"y1", 0.25}, {"bits", bits}}})}};
+}
+
+// The mapping a real calibration would find: camera (0.2..0.8, 0.2..0.8) covers the whole screen.
+static json zoom_h() { return json::array({1.0 / 0.6, 0, -0.2 / 0.6, 0, 1.0 / 0.6, -0.2 / 0.6, 0, 0, 1}); }
+
+TEST(auto_calibration_needs_a_connected_agent) {
+	HubFixture f("hub");
+	json r = f.hub->calibrate_auto();
+	CHECK(r["ok"] == false);
+	CHECK(r["error"].get<std::string>().find("agent") != std::string::npos);
+}
+
+TEST(auto_calibration_asks_the_agent_with_the_display_size) {
+	AutoCalibFixture f;
+	json r = f.hub->calibrate_auto();
+	CHECK(r["ok"] == true);
+	CHECK(f.to_edge.size() >= 2);  // hello_ack, then the request
+	json req = f.to_edge.back();
+	CHECK(req["t"] == "calib_capture" && req["id"] == r["id"]);
+	CHECK(req["screen"] == json::array({1000, 500}));
+	CHECK(f.hub->status()["auto_calib"]["active"] == r["id"]);
+}
+
+TEST(auto_calibration_pattern_is_relayed_cleaned_and_only_while_calibrating) {
+	AutoCalibFixture f;
+	f.hub->on_calib_pattern(pattern_msg(1));
+	CHECK(f.last("calib_pattern").is_null());  // nothing running: ignored
+	int id = f.hub->calibrate_auto()["id"];
+	json evil = pattern_msg(id);
+	evil["markers"][0]["onload"] = "<script>";
+	f.hub->on_calib_pattern(evil);
+	json shown = f.last("calib_pattern");
+	CHECK(shown["show"] == true && shown["markers"].size() == 1);
+	CHECK(!shown["markers"][0].contains("onload"));  // only the known fields reach the display
+	f.all.clear();
+	f.hub->on_calib_pattern(pattern_msg(id, "01x0"));  // malformed bits: not shown
+	CHECK(f.last("calib_pattern").is_null());
+	f.hub->on_calib_pattern(pattern_msg(id + 5));  // a different request: ignored
+	CHECK(f.last("calib_pattern").is_null());
+}
+
+TEST(auto_calibration_result_is_installed_saved_and_used_for_the_cursor) {
+	AutoCalibFixture f;
+	int id = f.hub->calibrate_auto()["id"];
+	f.hub->on_calib_result({{"t", "calib_result"}, {"id", id},
+							{"results", json::array({{{"cam", 0}, {"ok", true}, {"h", zoom_h()}, {"rms_px", 2.5},
+													  {"quality", "good"}, {"markers", 15}, {"of", 15}}})}});
+	json s = f.hub->status();
+	CHECK(s["auto_calib"]["active"] == 0);
+	CHECK(s["auto_calib"]["last"]["ok"] == true && s["auto_calib"]["last"]["cameras_calibrated"] == 1);
+	CHECK(s["auto_calib"]["last"]["results"][0]["rms_px"] == 2.5);
+	CHECK(f.last("calib_pattern")["show"] == false);  // the pattern is taken down
+	CHECK(f.last("calib")["done"] == true && f.last("calib")["cameras_calibrated"] == 1);
+	CHECK(std::filesystem::exists(f.dir / "calib.json"));  // survives a restart
+	// A fingertip at camera (0.35, 0.65) is a quarter / three quarters across the surface.
+	f.actions.clear();
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.35, 0.65, .95f)}));
+	const json *mv = f.first("move");
+	CHECK(mv && std::abs((*mv)["x"].get<int>() - 250) <= 2 && std::abs((*mv)["y"].get<int>() - 375) <= 2);
+}
+
+TEST(auto_calibration_failure_keeps_the_old_mapping_and_reports_why) {
+	AutoCalibFixture f;
+	int id = f.hub->calibrate_auto()["id"];
+	f.hub->on_calib_result({{"t", "calib_result"}, {"id", id},
+							{"results", json::array({{{"cam", 0}, {"ok", false}, {"reason", "pattern not found"}}})}});
+	json s = f.hub->status();
+	CHECK(s["auto_calib"]["last"]["ok"] == false);
+	CHECK(s["auto_calib"]["last"]["error"] == "pattern not found");
+	CHECK(f.last("calib")["error"] == "pattern not found");
+	CHECK(f.last("calib_pattern")["show"] == false);
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.35, 0.65, .95f)}));
+	CHECK(f.hub->status()["cameras"]["0"]["calibrated"] == false);
+}
+
+TEST(auto_calibration_rejects_a_claimed_success_with_a_broken_matrix) {
+	AutoCalibFixture f;
+	int id = f.hub->calibrate_auto()["id"];
+	f.hub->on_calib_result({{"t", "calib_result"}, {"id", id},
+							{"results", json::array({{{"cam", 0}, {"ok", true}, {"h", json::array({0, 0, 0, 0, 0, 0, 0, 0, 1})}},
+													 {{"cam", "zero"}, {"ok", "yes"}}, 7})}});
+	json s = f.hub->status();
+	CHECK(s["auto_calib"]["last"]["ok"] == false);
+	CHECK(s["auto_calib"]["last"]["cameras_calibrated"] == 0);
+}
+
+TEST(auto_calibration_ignores_stale_results_and_can_be_cancelled) {
+	AutoCalibFixture f;
+	int first = f.hub->calibrate_auto()["id"];
+	int second = f.hub->calibrate_auto()["id"];
+	CHECK(second == first + 1);
+	f.hub->on_calib_result({{"t", "calib_result"}, {"id", first},
+							{"results", json::array({{{"cam", 0}, {"ok", true}, {"h", zoom_h()}}})}});
+	CHECK(f.hub->status()["auto_calib"]["active"] == second);  // the old answer did not end the new request
+	f.hub->calibrate_cancel();
+	CHECK(f.to_edge.back()["t"] == "calib_cancel");
+	CHECK(f.last("calib_pattern")["show"] == false);
+	CHECK(f.hub->status()["auto_calib"]["last"]["error"] == "cancelled");
+}
+
+TEST(auto_calibration_ends_cleanly_when_the_agent_disconnects) {
+	AutoCalibFixture f;
+	f.hub->calibrate_auto();
+	f.hub->edge_closed();
+	json s = f.hub->status();
+	CHECK(s["auto_calib"]["active"] == 0);
+	CHECK(s["auto_calib"]["last"]["ok"] == false);
+	CHECK(f.last("calib_pattern")["show"] == false);
+}
+
+TEST(calibration_measured_offline_can_be_installed_and_garbage_cannot) {
+	HubFixture f("hub");
+	std::string err;
+	CHECK(!f.hub->calibrate_set(0, json::array({1, 2, 3}), err) && !err.empty());
+	CHECK(!f.hub->calibrate_set(99, zoom_h(), err));
+	CHECK(f.hub->calibrate_set(0, zoom_h(), err));
+	f.hub->on_hands(hands_msg(0, {pose_hand(false, 0.35, 0.65, .95f)}));
+	CHECK(f.hub->status()["cameras"]["0"]["calibrated"] == true);
+}
+
+TEST(a_pattern_can_be_shown_by_hand_and_bad_ones_are_refused) {
+	HubFixture f("hub");
+	CHECK(f.hub->show_calib_pattern(pattern_msg(0)));
+	CHECK(f.all.back()["t"] == "calib_pattern" && f.all.back()["show"] == true);
+	json too_big = pattern_msg(0);
+	too_big["markers"][0]["x1"] = 5.0;
+	CHECK(!f.hub->show_calib_pattern(too_big));
+	CHECK(f.hub->show_calib_pattern({{"show", false}}));
+	CHECK(f.all.back()["show"] == false);
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   for (auto& t : tests()) {

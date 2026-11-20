@@ -9,6 +9,8 @@
 #     camera / picamera  real cameras + MediaPipe hand tracking (written but not yet tested on hardware)
 #   It can also turn the hub's actions into real OS mouse events (--os-pointer) so any window
 #   on the Pi, such as a real web browser, can be controlled by gestures.
+#   When the hub asks for it (`python3 ips.py calibrate auto`), it also runs the automatic surface calibration
+#   (edge/surface_calib.py): the projector shows a marker pattern and the camera measures where the picture is.
 # ---------------------------------------------------------------------------
 """Pi-side agent: produces hand landmarks and sends them to the hub.
 
@@ -149,6 +151,10 @@ class Link:
         self.ws.send_text(json.dumps(hello))
         self.pointer = OsPointer() if args.os_pointer else None
         self.alive = True
+        # Automatic surface calibration reports through whichever connection is current (the agent reconnects).
+        calib = getattr(args, "calib", None)
+        if calib is not None:
+            calib.send = self.send
         # Read the hub's replies on a separate thread so sending is never blocked.
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -162,10 +168,31 @@ class Link:
                     print("hub session", m.get("session"), "record_frames", m.get("record_frames"), flush=True)
                 elif m.get("t") == "action" and self.pointer:
                     self.pointer.apply(m)
+                elif m.get("t") == "calib_capture":
+                    self.start_calibration(m)
+                elif m.get("t") == "calib_cancel" and getattr(self.args, "calib", None) is not None:
+                    self.args.calib.cancel()
+                    print("calibration cancelled by the hub", flush=True)
                 elif m.get("t") == "error":
                     print("hub error:", m.get("error"), flush=True)
         except (WSClosed, OSError):
             self.alive = False
+
+    # The hub asked for an automatic surface calibration. Sources without camera images (synthetic, replay) and
+    # machines without the ArUco module answer at once with a clear failure instead of leaving the pattern up.
+    def start_calibration(self, m):
+        calib = getattr(self.args, "calib", None)
+        if calib is None:
+            reason = "the agent's source '%s' has no camera images to calibrate from" % self.args.source
+            print("calibration:", reason, flush=True)
+            self.send({"t": "calib_result", "id": m.get("id", 0),
+                       "results": [{"cam": c, "ok": False, "reason": reason} for c in range(len(self.args.cam_list))]})
+            return
+        try:
+            calib.start(m)
+        except Exception as exc:  # e.g. an OpenCV build without ArUco
+            print("calibration could not start: %s" % exc, flush=True)
+            calib.fail("calibration could not start: %s" % exc, m.get("id", 0))
 
     # Send one JSON message (compact form, to keep it small).
     def send(self, msg):
@@ -382,6 +409,19 @@ class Progress:
             self.reset()
 
 
+# Give one camera frame to the automatic surface calibration (does nothing unless a calibration is running).
+# A calibration problem must never stop hand tracking, so errors are reported and the calibration abandoned.
+def feed_calibration(args, cam, bgr, mirrored):
+    calib = getattr(args, "calib", None)
+    if calib is None or not calib.active:
+        return
+    try:
+        calib.feed(cam, bgr, mirrored)
+    except Exception as exc:
+        print("calibration error: %s" % exc, flush=True)
+        calib.fail("calibration error on the Pi: %s" % exc)
+
+
 # Video / photo source: runs the REAL hand tracker on a video file (or one photo, repeated) instead of a
 # live camera. Lets the whole pipeline be tested when nobody can stand in front of the camera.
 def run_video(link, args):
@@ -414,6 +454,7 @@ def run_video(link, args):
                     read_since_rewind = 0
                     continue
                 read_since_rewind += 1
+            feed_calibration(args, 0, bgr, False)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             ts = int(time.time() * 1e6)
             t0 = time.perf_counter()
@@ -466,6 +507,9 @@ def run_camera(link, args):
                 last_frame_at[i] = time.monotonic()
                 bgr, frame_t, cam_seq = newest
                 last_seq[i] = cam_seq
+                # Surface calibration looks at the UNflipped image (markers cannot be read mirrored) and is told about
+                # the flip, so its mapping matches the flipped coordinates the hand tracker sees.
+                feed_calibration(args, i, bgr, args.mirror)
                 if args.mirror:
                     bgr = cv2.flip(bgr, 1)
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -535,6 +579,11 @@ def main():
     if not args.no_motion:
         from motion_bridge import MotionBridge
         args.bridge = MotionBridge(max(args.max_hands, 2 if args.two_hands else 1))
+    # Automatic surface calibration, for the sources that have real images (it needs OpenCV, which they need anyway).
+    args.calib = None
+    if args.source in ("camera", "picamera", "video"):
+        from surface_calib import AutoCalibrator
+        args.calib = AutoCalibrator(lambda msg: None, range(len(args.cam_list)))
     # Map the chosen --source to the function that implements it.
     runner = {"synthetic": run_synthetic, "replay": run_replay, "camera": run_camera, "picamera": run_camera, "video": run_video}[args.source]
     # Connect and run; on connection failure wait 2 seconds and try again.

@@ -89,6 +89,41 @@ namespace ips
 		return true;
 	}
 
+	bool homography_from_json(const json &j, Homography &out)
+	{
+		if (!j.is_array() || j.size() != 9)
+			return false;
+		Homography h;
+		for (int i = 0; i < 9; ++i)
+		{
+			if (!j[i].is_number())
+				return false;
+			h.h[i] = j[i].get<double>();
+			if (!std::isfinite(h.h[i]))
+				return false;
+		}
+		if (std::fabs(h.h[8]) < 1e-12)
+			return false;
+		const double scale = h.h[8];
+		for (auto &v : h.h)
+			v /= scale;
+		h.h[8] = 1; // exact (guards against rounding)
+		const auto &a = h.h;
+		double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+		if (!std::isfinite(det) || std::fabs(det) < 1e-12)
+			return false; // singular: it would squash the camera image onto a line
+		// The camera image's corners and centre must map to finite points.
+		const Vec2 probe[5] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
+		for (auto p : probe)
+		{
+			Vec2 q = h.apply(p);
+			if (!std::isfinite(q.x) || !std::isfinite(q.y))
+				return false;
+		}
+		out = h;
+		return true;
+	}
+
 	// Convert a camera point (0..1) to projector pixels using that camera's calibration,
 	// or simply scale to the screen size when the camera has not been calibrated yet.
 	Vec2 Mapper::to_px(int cam, Vec2 n) const
@@ -98,6 +133,12 @@ namespace ips
 		if (it != hs_.end())
 		{
 			Vec2 f = it->second.apply(n);
+			// Keep the point on the surface. Near the "horizon" of a steeply tilted view the perspective divide can
+			// produce huge or non-finite values; those are held at the screen centre rather than thrown off-screen.
+			if (!std::isfinite(f.x) || !std::isfinite(f.y))
+				f = {0.5, 0.5};
+			f.x = std::clamp(f.x, 0.0, 1.0);
+			f.y = std::clamp(f.y, 0.0, 1.0);
 			return {f.x * w_, f.y * h_};
 		}
 		return {n.x * w_, n.y * h_};

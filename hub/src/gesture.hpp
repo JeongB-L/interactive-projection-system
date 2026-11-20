@@ -48,6 +48,11 @@ namespace ips
 	// Compute the homography from 4 camera points to the 4 projector points they correspond to.
 	// Returns false if the points are degenerate (e.g. all on one line).
 	bool solve_homography(const std::array<Vec2, 4> &src, const std::array<Vec2, 4> &dst, Homography &out);
+	// Read a homography that arrives from outside (the agent's automatic surface calibration, or the offline tool) as a
+	// JSON array of 9 numbers. Accepts it only if every number is finite, the matrix is not singular, and it maps the
+	// whole camera image to finite points; the result is scaled so that h[8] = 1. Returns false (and leaves `out`
+	// untouched) otherwise, so a malformed message can never install a broken calibration.
+	bool homography_from_json(const json &j, Homography &out);
 
 	// Holds one Homography per camera plus the projector's pixel size.
 	class Mapper
@@ -62,6 +67,8 @@ namespace ips
 		int width() const { return w_; }
 		int height() const { return h_; }
 		// Camera point -> projector pixel. An uncalibrated camera just scales 0..1 to the screen size.
+		// A calibrated camera's result is kept ON the screen: a fingertip beyond the projected picture's edge holds the
+		// cursor at that edge (like a mouse at the edge of a monitor) instead of sending it far off-screen.
 		Vec2 to_px(int cam, Vec2 norm) const;
 		bool calibrated(int cam) const { return hs_.count(cam) > 0; }
 		void set(int cam, const Homography &h) { hs_[cam] = h; }

@@ -9,7 +9,7 @@
 //
 //   Safety rules implemented here (each has a test in tests/e2e.py):
 //     - A URL can only ever name a file INSIDE the ui/ folder (no "..", no "//absolute/paths", no drive letters).
-//     - Sensitive calls (shut down, ask the AI, calibrate, dim, list stored files, open an arbitrary URL) are
+//     - Sensitive calls (shut down, ask the AI, calibrate (all /api/calibrate/... calls), dim, list stored files, open an arbitrary URL) are
 //       accepted from this computer, or from elsewhere only with the secret IPS_TOKEN in an X-IPS-Token header.
 //     - One malformed message cannot silently kill a connection's reader, and one stuck client cannot freeze
 //       the hub: messages to each client go through that client's own queue and writer thread.
@@ -185,6 +185,26 @@ void handle_http(tcp::socket& s, const Req& req, Hub& hub) {
   if (!ok) return forbidden();
   if (path == "/api/calibrate/start") { hub.calibrate_start(); return reply_json(s, req, {{"ok", true}}); }
   if (path == "/api/calibrate/reset") { hub.calibrate_reset(); return reply_json(s, req, {{"ok", true}}); }
+  // Automatic surface calibration: the agent shows a marker pattern and measures it with the camera.
+  if (path == "/api/calibrate/auto") {
+    json r = hub.calibrate_auto();
+    return reply_json(s, req, r, r.value("ok", false) ? http::status::ok : http::status::conflict);
+  }
+  if (path == "/api/calibrate/cancel") { hub.calibrate_cancel(); return reply_json(s, req, {{"ok", true}}); }
+  // Install a homography measured elsewhere (tools/surface_calib.py on a recorded video): {"cam": 0, "h": [9 numbers]}.
+  if (path == "/api/calibrate/set") {
+    std::string err;
+    int cam = b.contains("cam") && b["cam"].is_number_integer() ? b["cam"].get<int>() : 0;
+    if (!hub.calibrate_set(cam, b.contains("h") ? b["h"] : json(), err))
+      return reply_json(s, req, {{"ok", false}, {"error", err}}, http::status::bad_request);
+    return reply_json(s, req, {{"ok", true}});
+  }
+  // Show / hide the marker pattern without measuring (to record a calibration video by hand).
+  if (path == "/api/calibrate/pattern") {
+    if (!hub.show_calib_pattern(b))
+      return reply_json(s, req, {{"ok", false}, {"error", "bad pattern"}}, http::status::bad_request);
+    return reply_json(s, req, {{"ok", true}});
+  }
   if (path == "/api/brightness") { hub.set_brightness(b.value("value", 1.0)); return reply_json(s, req, {{"ok", true}}); }
   if (path == "/api/ai") {
     // Ask the AI provider (key stays on the hub); pass its answer or error back to the page.
@@ -323,6 +343,10 @@ void handle_edge(WsPeer& p, Hub& hub) {
           break;
         } else if (t == "hands") {
           hub.on_hands(j); // the real-time path: see hub.cpp
+        } else if (t == "calib_pattern") {
+          hub.on_calib_pattern(j);  // automatic calibration: show / hide the marker pattern on the display
+        } else if (t == "calib_result") {
+          hub.on_calib_result(j);   // automatic calibration: the measured camera -> screen mappings
         } else if (t == "ping") {
           p.send(json{{"t", "pong"}, {"ts", j.value<int64_t>("ts", 0)}}.dump());
         }

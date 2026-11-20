@@ -7,8 +7,8 @@ Hub: `http://<laptop>:8080`. Everything below is a WebSocket at `ws://<laptop>:8
 
 | Path | Peer | Direction |
 |---|---|---|
-| `/edge` | Pi agent | agent → hub: hello, hands, frames. hub → agent: hello_ack, action (only if `os_pointer`), pong |
-| `/display` | projected page (browser on the Pi) | hub → page: content, action, calib, brightness, hb |
+| `/edge` | Pi agent | agent → hub: hello, hands, frames, calib_pattern, calib_result. hub → agent: hello_ack, action (only if `os_pointer`), pong, calib_capture, calib_cancel |
+| `/display` | projected page (browser on the Pi) | hub → page: content, action, calib, calib_pattern, brightness, hb |
 
 ## Pi agent → hub (`/edge`)
 
@@ -44,6 +44,27 @@ Optional JPEG frame (binary WebSocket message): `[1 byte camera index][JPEG byte
 
 `{"t":"ping","ts":N}` → `{"t":"pong","ts":N}`.
 
+### Automatic surface calibration (`ips.py calibrate auto`)
+
+The agent owns the camera, so it measures; the hub starts it, relays the pattern and installs the result
+(code: `edge/surface_calib.py`, `Hub::calibrate_auto` / `on_calib_result`).
+```json
+hub → agent  {"t":"calib_capture","id":3,"screen":[1920,1080]}
+agent → hub  {"t":"calib_pattern","id":3,"show":true,"grid":6,
+              "markers":[{"id":0,"x0":0.07,"y0":0.08,"x1":0.17,"y1":0.27,"bits":"1011000101100110"}, ...]}
+agent → hub  {"t":"calib_result","id":3,"screen":[1920,1080],
+              "results":[{"cam":0,"ok":true,"h":[9 numbers],"rms_px":1.6,"max_px":3.2,"quality":"good",
+                          "markers":15,"of":15,"frames":8,"inliers":60}]}
+             (a failed camera: {"cam":1,"ok":false,"reason":"pattern not found in the camera image within 12 s"})
+hub → agent  {"t":"calib_cancel","id":3}
+```
+- Marker positions are fractions of the screen; corners in ArUco order (top-left, top-right, bottom-right, bottom-left).
+  `bits` are the marker's inner 4x4 cells row by row (`1` = white), from OpenCV's `DICT_4X4_50`.
+- `h` maps a **normalized camera point** (same space as the hand landmarks, after `--mirror`) to a **fraction of the
+  screen**, row-major. The hub checks it (9 finite numbers, not singular) before installing it, and ignores results
+  whose `id` is not the request it is waiting for.
+- Sources without images (`synthetic`, `replay`) answer `calib_capture` at once with `ok:false`.
+
 ## Hub → display page (`/display`)
 
 ```json
@@ -51,6 +72,9 @@ Optional JPEG frame (binary WebSocket message): `[1 byte camera index][JPEG byte
 {"t":"action","kind":"move|down|up|swipe|zoom|home|hide","x":960,"y":540,"detail":"left"}
 {"t":"calib","step":0,"total":4,"x":192,"y":108}                 show a calibration marker
 {"t":"calib","done":true,"cameras_calibrated":2}
+{"t":"calib","done":true,"auto":true,"cameras_calibrated":0,"error":"..."}  automatic calibration failed
+{"t":"calib_pattern","show":true,"grid":6,"markers":[...]}           cover the screen with the marker pattern
+{"t":"calib_pattern","show":false}
 {"t":"brightness","value":0.6}
 {"t":"hb"}                                                        heartbeat, every second
 ```
@@ -66,7 +90,11 @@ The same `action` messages go to the agent when it said `os_pointer:true`, so a 
 | `GET /api/apps` | configured apps |
 | `POST /api/launch {"app":"snake"}` | switch app (id, `launcher`, or a URL) |
 | `POST /api/home` | back to launcher |
-| `POST /api/calibrate/start` · `/reset` | calibration |
+| `POST /api/calibrate/auto` | automatic surface calibration; `{"ok":true,"id":n}`, or 409 with `error` when no agent is connected. The outcome appears in `/api/status` → `auto_calib.last` |
+| `POST /api/calibrate/cancel` | stop a running automatic calibration (takes the pattern down) |
+| `POST /api/calibrate/set {"cam":0,"h":[9 numbers]}` | install a mapping measured offline (`tools/surface_calib.py fit --apply`) |
+| `POST /api/calibrate/pattern {"show":true,"grid":6,"markers":[...]}` | show / hide the pattern without measuring |
+| `POST /api/calibrate/start` · `/reset` | the older pinch-at-4-markers calibration · forget the calibration |
 | `POST /api/brightness {"value":0.5}` | dim the projected image |
 | `POST /api/display_size {"w":1920,"h":1080}` | sent by the display page |
 | `POST /api/ai {"prompt":"..."}` | ask the AI (key read from the hub's `.env`) |
@@ -84,7 +112,7 @@ Static: `/ui/display.html`, `/status`, `/apps/*.html`.
 | Another machine **with** `X-IPS-Token: <IPS_TOKEN>` | everything |
 | Another machine, wrong or no token, sensitive call | HTTP 403 `{"ok":false,"error":"forbidden: ..."}` |
 
-Sensitive = `POST /api/shutdown`, `/api/ai`, `/api/calibrate/start|reset`, `/api/brightness`, `/api/launch` with a URL that is not a configured app, `GET /api/sessions`, `GET /api/assets`.
+Sensitive = `POST /api/shutdown`, `/api/ai`, every `/api/calibrate/...` call, `/api/brightness`, `/api/launch` with a URL that is not a configured app, `GET /api/sessions`, `GET /api/assets`.
 URLs under `/ui/` and `/apps/` can only name files inside the `ui/` folder; anything else is a 404.
 A malformed message on `/edge` is counted in `bad_messages` and skipped; it never closes the connection.
 Large messages may reach a client split into several WebSocket frames (normal; browsers and the agent's client reassemble them).

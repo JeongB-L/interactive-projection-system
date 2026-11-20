@@ -92,7 +92,10 @@ The **only shared contract** everyone must agree on is the message format in PRO
 
 **Models.** A `models/` folder with one subfolder per model version and a `models.yaml` choosing the active one per role (`tracker`, `gesture`). Each benchmark run records which model version and hand source it used. No registry service, no promotion workflow. This is the "place to manage the ML stuff" for the prototype.
 
-**Calibration (how the 4-corner routine works).** The display shows four markers; the user points a fingertip at each and holds a pinch; the hub records the camera-space fingertip for each marker and computes the homography. No special hardware, works with one camera.
+**Calibration.** Two routines produce the same thing: one homography per camera, from normalized camera coordinates to fractions of the screen.
+- *Automatic surface calibration* (default, `ips.py calibrate auto`): the display shows a 5 x 3 grid of ArUco markers; the agent, which owns the camera, detects their 60 corners over ~8 frames, takes the per-corner median, and fits the homography with RANSAC plus a least-squares refinement (`edge/surface_calib.py`). It reports its RMS error in projector pixels. No hand needed, so it can be run remotely; partial occlusion and single bad corners are tolerated.
+- *4-corner pinch routine* (older): the display shows four markers; the user points a fingertip at each and pinches; the hub fits the homography from those four points.
+Calibrated positions are clamped to the screen, so a fingertip beyond the projected picture holds the cursor at its edge.
 
 ## 5c. Storage: blobs on disk, an index in SQLite
 

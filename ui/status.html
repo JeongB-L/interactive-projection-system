@@ -29,6 +29,10 @@ async function tick() {
     const s = await (await fetch('/api/status')).json();
     const cams = Object.entries(s.cameras).map(([c, v]) => `cam${esc(c)}: ${esc(v.frames)} frames, calibrated: ${esc(v.calibrated)}`).join('<br>') || '-';
     const gc = Object.entries(s.gesture_counts).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(' ') || '-';
+    // Last automatic surface calibration, as plain text (escaped when it goes into the page).
+    const ac = s.auto_calib || {}, al = ac.last;
+    const calibText = ac.active ? 'running...' : !al ? '-' : (al.results || []).map(r => 'cam' + r.cam + ': ' +
+      (r.ok ? (r.quality + ', ' + f(r.rms_px) + ' px rms, ' + r.markers + '/' + r.of + ' markers') : 'failed (' + r.reason + ')')).join('; ') || ('failed (' + al.error + ')');
     const last = s.last_gestures.slice().reverse().map(g => esc(g.kind + (g.dir ? ' ' + g.dir : ''))).join(', ') || '-';
     document.getElementById('o').innerHTML = `
       <table>
@@ -37,6 +41,7 @@ async function tick() {
       <tr><th>App</th><td>${esc(s.app)}</td></tr>
       <tr><th>Frames/s (all cameras)</th><td>${f(s.fps_total)}</td></tr>
       <tr><th>Cameras</th><td>${cams}</td></tr>
+      <tr><th>Surface calibration</th><td>${esc(calibText)}</td></tr>
       <tr><th>Hub processing ms (p50 / p95)</th><td>${f(s.hub_ms.p50, 3)} / ${f(s.hub_ms.p95, 3)}</td></tr>
       <tr><th>End-to-end ms (p50 / p95)</th><td>${f(s.e2e_ms.p50)} / ${f(s.e2e_ms.p95)} <small>(needs synced clocks)</small></td></tr>
       <tr><th>Tracking ms on Pi (avg)</th><td>${f(s.track_ms_avg)}</td></tr>

@@ -20,7 +20,8 @@
   python ips.py open             open the projected display page (and `open status` for the status page)
   python ips.py launch snake     switch app (browser | ai | snake | launcher | any URL)
   python ips.py home             back to the launcher
-  python ips.py calibrate        show the 4 calibration markers (`calibrate reset` clears it)
+  python ips.py calibrate auto   map the camera onto the projected surface automatically (no hand needed)
+  python ips.py calibrate        older way: point at 4 markers and pinch (`calibrate reset` clears calibration)
   python ips.py brightness 0.5   dim the projected image (0..1)
   python ips.py ai "question"    ask the AI through the hub (key stays in .env)
   python ips.py sessions         list recorded sessions
@@ -237,6 +238,13 @@ def cmd_status(a):
           % (s["fps_total"], s["hub_ms"]["p50"], s["hub_ms"]["p95"], s["e2e_ms"]["p50"], s["e2e_ms"]["p95"],
              s["track_ms_avg"], s["dropped"]))
     print("cameras:", {c: ("%d frames, calibrated=%s" % (v["frames"], v["calibrated"])) for c, v in s["cameras"].items()})
+    last = (s.get("auto_calib") or {}).get("last")
+    if (s.get("auto_calib") or {}).get("active"):
+        print("surface calibration: running")
+    elif last:
+        parts = [("cam%d %s %.1f px rms" % (r["cam"], r.get("quality", "?"), r.get("rms_px", 0))) if r.get("ok")
+                 else ("cam%d failed: %s" % (r.get("cam", -1), r.get("reason", "?"))) for r in last.get("results", [])]
+        print("surface calibration (last):", "; ".join(parts) or "failed: %s" % last.get("error"))
     print("gestures acted on:", s["gesture_counts"], "(engine in charge: %s)" % s.get("gesture_source", "hub"))
     if s.get("motion_frames"):
         print("engine comparison (detected, excluding cursor moves):")
@@ -339,11 +347,59 @@ def cmd_home(a):
     print("ok")
 
 
-# `calibrate`: show the four calibration markers (`calibrate reset` clears the calibration).
+# `calibrate`:
+#   auto     the projector shows a marker pattern and the camera agent measures it (edge/surface_calib.py); waits
+#            for the result and prints its accuracy. Needs the agent running (pi-start).
+#   cancel   give up a running automatic calibration (takes the pattern down)
+#   pattern / hide   show / hide the pattern without measuring (to record a calibration video; see tools/surface_calib.py)
+#   start    the older way: point at four yellow dots and pinch at each
+#   reset    forget the calibration (cameras go back to plain scaling)
 def cmd_calibrate(a):
     need_hub()
+    if a.action in ("pattern", "hide"):
+        cmd = [AGENT_PY, os.path.join(ROOT, "tools", "surface_calib.py"), "pattern"] + (["--hide"] if a.action == "hide" else [])
+        sys.exit(subprocess.run(cmd, env=dict(os.environ, IPS_URL=BASE)).returncode)
+    if a.action == "auto":
+        return calibrate_auto(a.timeout)
+    if a.action == "cancel":
+        api("/api/calibrate/cancel", {})
+        return print("automatic calibration cancelled")
     api("/api/calibrate/" + ("reset" if a.action == "reset" else "start"), {})
     print("calibration markers shown; point at each yellow dot and pinch" if a.action != "reset" else "calibration cleared")
+
+
+# Run the automatic surface calibration and report the outcome per camera.
+def calibrate_auto(timeout):
+    r = api("/api/calibrate/auto", {})
+    if not r or not r.get("ok"):
+        sys.exit("cannot calibrate: %s" % ((r or {}).get("error") or "no answer from the hub"))
+    rid = r["id"]
+    print("pattern on the projector; measuring with the camera (keep the view clear)...", flush=True)
+    end = time.time() + timeout
+    last = None
+    while time.time() < end:
+        time.sleep(0.5)
+        s = api("/api/status") or {}
+        last = (s.get("auto_calib") or {}).get("last")
+        if last and last.get("id") == rid:
+            break
+    else:
+        api("/api/calibrate/cancel", {})
+        sys.exit("no answer from the camera agent within %d s; calibration cancelled.\n"
+                 "Is the agent running with a camera or video source? See `python3 ips.py logs` and data/logs/agent.log" % timeout)
+    for res in last.get("results", []):
+        if res.get("ok"):
+            print("camera %d: calibrated (%s): %d/%d markers, error %.1f px rms (%.1f px worst)" % (
+                res["cam"], res.get("quality", "?"), res.get("markers", 0), res.get("of", 0),
+                res.get("rms_px", 0), res.get("max_px", 0)))
+            if res.get("quality") == "poor":
+                print("  the fit is usable but loose: is the surface flat? Is the whole picture in the camera's view?")
+        else:
+            print("camera %d: FAILED: %s" % (res.get("cam", -1), res.get("reason", "unknown")))
+    if not last.get("ok"):
+        print("hints: the camera must see the projected picture; dim room light helps; check with "
+              "`python3 ips.py calibrate pattern` and a photo from the camera, then `calibrate hide`")
+        sys.exit(1)
 
 
 # `brightness`: dim the projected image (0 = black, 1 = full).
@@ -474,7 +530,9 @@ def main():
     add("open", cmd_open, ("page", dict(nargs="?", default="display", choices=["display", "status"])))
     add("launch", cmd_launch, ("app", dict()))
     add("home", cmd_home)
-    add("calibrate", cmd_calibrate, ("action", dict(nargs="?", default="start", choices=["start", "reset"])))
+    add("calibrate", cmd_calibrate, ("action", dict(nargs="?", default="start",
+                                                    choices=["auto", "start", "reset", "cancel", "pattern", "hide"])),
+        ("--timeout", dict(type=int, default=25, help="calibrate auto: seconds to wait for the camera agent")))
     add("brightness", cmd_brightness, ("value", dict(type=float)))
     add("ai", cmd_ai, ("prompt", dict(nargs="+")))
     add("sessions", cmd_sessions)

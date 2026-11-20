@@ -75,6 +75,14 @@ namespace ips
 		void home();								// back to the launcher
 		void calibrate_start();						// show 4 markers and learn from the next 4 pinches
 		void calibrate_reset();						// forget calibration
+		// Automatic surface calibration (no hand needed): ask the agent to show a marker pattern and measure it with
+		// the camera. Returns {"ok": true, "id": n}, or {"ok": false, "error": ...} when no agent is connected.
+		json calibrate_auto();
+		void calibrate_cancel();												 // give up a running automatic calibration
+		bool calibrate_set(int cam, const json &h, std::string &error);		 // install a homography measured elsewhere
+		bool show_calib_pattern(const json &msg);							 // relay a (validated) pattern to the displays
+		void on_calib_pattern(const json &msg);								 // agent: show / hide the pattern
+		void on_calib_result(const json &msg);								 // agent: the measured homographies
 		void set_display_size(int w, int h);		// the display page reports its pixel size
 		void set_brightness(double b);				// dim the projected image (0..1)
 		void shutdown();							// flush recordings before exit
@@ -117,6 +125,10 @@ namespace ips
 		// calibration state: which marker we are on, and the fingertip samples collected so far
 		int calib_step_ = -1;							 // -1 = not calibrating
 		std::vector<std::map<int, Vec2>> calib_samples_; // per step: camera -> raw fingertip
+		// automatic surface calibration: the running request (0 = none) and the outcome of the last one
+		int auto_calib_seq_ = 0;		// id of the most recent request
+		int auto_calib_active_ = 0;		// id of the request still waiting for the agent's answer, 0 if none
+		json auto_calib_last_ = nullptr; // summary of the last finished one (shown by `ips.py calibrate auto` and /status)
 
 		// metrics shown on the status page
 		int64_t started_us_ = steady_us();
