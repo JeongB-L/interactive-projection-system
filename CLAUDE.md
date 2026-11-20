@@ -59,4 +59,5 @@ Run `python3 ips.py stop` before using (2), and `pi-start` again afterwards.
 - Run `python3 ips.py test` before every commit.
 - Do not push unless Jeongbin says so. If there is no GitHub login, say so; do not look for tokens or ask for one to be pasted.
 - Ask before every `sudo` command.
+- Do not delete `~/backup_untracked/` (pre-pull backup of the Pi's untracked files, described in README.md).
 - Leave the untracked repo-root files alone: `pi_hand_tracking_v2/` (an extra unzipped copy of Johnny's folder) and `test.jpg`.

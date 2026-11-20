@@ -26,7 +26,7 @@ python3 ips.py pi-start           # hub + camera agent + fullscreen display on t
 python3 ips.py stop               # stops all of it
 python3 ips.py install-autostart  # optional: start automatically when the Pi's desktop logs in
 ```
-Untested on real hardware so far; see docs/RUNBOOK.md ("Real Pi") for what to check first.
+Verified on the team's Pi 5 with the synthetic routine and with real MediaPipe on recorded video (about 11-14 fps, no dropped frames). Gesture accuracy is still being improved. See docs/RUNBOOK.md ("Real Pi") for what to check first.
 
 ## Try it (2 minutes, no hardware)
 
@@ -63,6 +63,8 @@ Projector <- HDMI <- Pi browser showing display page <-- actions --+
 | `ui/` | display page and apps |
 | `ips.py` | command-line control (start, stop, status, sim, bench, ...) |
 | `tools/iter_assets.py` | example of reading every stored file through the database |
+| `tools/video_probe.py`, `tools/probe_csv.py` | offline pinch/engine diagnosis of a recorded gesture video |
+| `version1/` | Nina's standalone path: camera → MediaPipe gesture recognizer → Linux virtual touchscreen ([steps](version1/steps.md)) |
 | `config.json`, `.env.example` | settings; secrets go in `.env` (git-ignored) |
 | `docs/` | [SPEC](docs/SPEC.md) (requirements, tests, status) · [RUNBOOK](docs/RUNBOOK.md) · [DESIGN](docs/DESIGN.md) · [INTERFACES](docs/INTERFACES.md) · [PROTOCOL](docs/PROTOCOL.md) |
 
@@ -84,6 +86,25 @@ The other engine is never wasted: the status page and `python ips.py status` com
 live data, so the choice can be made from evidence. Johnny's original app is kept exactly as he wrote it in
 [edge/pi_hand_tracking_v2/](edge/pi_hand_tracking_v2/) (its own instructions are in its README); the agent uses his
 motion engine and his latest-frame camera class from there without modifying them.
+
+## Virtual touchscreen path (version1)
+
+[version1/](version1/) is a second, standalone way to drive the Pi's desktop. `test.py` reads the camera with Picamera2,
+runs MediaPipe's gesture recognizer, and prints [virtual_touchscreen](https://github.com/vi/virtual_touchscreen)
+commands. The palm position moves the touch point and a thumbs-up presses. Piped into `/dev/virtual_touchscreen`, it acts like a
+touchscreen on the desktop. It does not use the hub. Only one program can use the camera at a time, so run
+`python3 ips.py stop` before it and `python3 ips.py pi-start` after. Step-by-step setup: [version1/steps.md](version1/steps.md).
+
+## Backups on the team Pi
+
+On 2026-11-20, before Nina's `version1/` was pulled, the Pi's untracked files were copied to
+`~/backup_untracked/` on the Pi. Keep this folder. Do not delete it.
+
+| Backup | What it holds |
+|---|---|
+| `version1/`, `version1_pre_pull/` | the Pi's earlier local `version1/` (older README describing a `Pointing_Up` design, `test.py` with `--min-score` 0.5, `test_click_only.py`) |
+| `pi_hand_tracking_v2/` | an extra unzipped copy of Johnny's folder from the repo root (the repo's copy is `edge/pi_hand_tracking_v2/`) |
+| `test.jpg` | a test image from the repo root |
 
 ## Security in one paragraph
 
